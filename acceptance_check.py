@@ -1,0 +1,438 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 Roberto Locatelli
+"""Acceptance-record checker for the x402 tsc#4 acceptance conditions (third, independent implementation).
+
+Written from the README of babyblueviper1/preaction-governance-conformance at 5a4ea06 and 646588c
+(examples/acceptance-record-cold/README.md), the condition table posted in x402-foundation/tsc#4 on
+2026-10-04, draft-krausz-verification-state-03 Sections 5.3.2, 5.4.1 and 5.4.2, and RFC 8032 Section 5.1.
+While it was written (2026-10-11), the code of the other acceptance-record checkers (the reference one and
+actaseal's) was not opened; see the README for what else of that repository we had read before.
+
+Closed by construction: every input member is either understood or refused with a reason. The only
+members not refused are those a standard says to ignore (RFC 7515 Section 4: JOSE header parameters
+not listed in "crit"; RFC 7517 Section 4: JWK members), and those are listed in "notes". JSON nested deeper
+than MAX_DEPTH levels is refused before it is parsed, and JSON numbers are kept as opaque values (no member
+of this grammar is a number), so the verdict does not depend on the Python version, on the recursion limit
+or on PYTHONINTMAXSTRDIGITS.
+
+Python 3 standard library only. Usage: python3 acceptance_check.py CASE.json  (a JSON object = the "case").
+Exit: 0 verified, 2 unknown / key_unresolved / no_record, 1 malformed, 3 input outside the grammar.
+"""
+import base64
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+import ed25519_rfc8032 as ed
+
+VERSION = "acceptance-record-v0"                      # README A1
+DISPOSITIONS_SIGNED = ("accepted", "rejected", "disputed")   # A2: not_responded is never signed
+EXIT = {"verified": 0, "unknown": 2, "key_unresolved": 2, "no_record": 2, "malformed": 1,
+        "signature_invalid": 1, "input_error": 3}
+
+CASE_MEMBERS = {"acceptance", "accepted_record", "delegation", "trust_material", "trust_material_complete"}
+RECORD_MEMBERS = {"issuer", "issuer_kid", "terms_sha256", "outcome_sha256", "outcome_at", "record_id"}
+RECORD_REQUIRED = {"issuer", "issuer_kid", "terms_sha256", "outcome_sha256", "outcome_at"}
+ENVELOPE_MEMBERS = {"protected", "payload", "signature"}
+PAYLOAD_MEMBERS = {"acceptance_version", "accepted_at", "accepted_record_sha256", "confirming_party",
+                   "disposition", "outcome_sha256", "terms_sha256"}
+HEADER_UNDERSTOOD = {"alg", "kid"}
+MAX_DEPTH = 64                                         # our limit; the grammar itself needs 3 levels
+JWK_UNDERSTOOD = {"kty", "crv", "kid", "x"}
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_B64URL = re.compile(r"[A-Za-z0-9_-]*")
+_TS = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]{3})Z")
+
+
+class InputError(Exception):
+    """The relying party's own input is outside the grammar this checker implements."""
+
+
+class _Dup(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- strict primitives
+
+def _no_dup_pairs(pairs):
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise _Dup(k)
+        out[k] = v
+    return out
+
+
+def _bad_constant(name):
+    raise ValueError("non-finite number " + name)
+
+
+class _Number(object):
+    """A JSON number, kept as its text. No member of this grammar is a number, so it is never converted."""
+    __slots__ = ("text",)
+
+    def __init__(self, text):
+        self.text = text
+
+
+def _check_depth(text):
+    """Refuse JSON nested deeper than MAX_DEPTH, counting brackets outside strings, before json.loads."""
+    depth, in_str, esc = 0, False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise ValueError("JSON nested deeper than %d levels" % MAX_DEPTH)
+        elif ch in "]}":
+            depth -= 1
+
+
+def strict_json(text):
+    """RFC 8259 JSON, refusing duplicate names (RFC 7515 5.2 / RFC 7493 2.3), NaN/Infinity and lone surrogates."""
+    _check_depth(text)
+    try:
+        obj = json.loads(text, object_pairs_hook=_no_dup_pairs, parse_constant=_bad_constant,
+                         parse_int=_Number, parse_float=_Number)
+    except _Dup as e:
+        raise ValueError("duplicate member name %r" % (e.args[0],))
+    except RecursionError:            # not reachable under MAX_DEPTH; kept so that no input can raise it
+        raise ValueError("JSON nested too deeply")
+    _check_strings(obj)
+    return obj
+
+
+def _check_strings(obj):
+    stack = [obj]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, str):
+            o.encode("utf-8")  # raises on a lone surrogate (RFC 7493 2.1)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                k.encode("utf-8")
+                stack.append(v)
+        elif isinstance(o, list):
+            stack.extend(o)
+
+
+def b64url_strict(s):
+    """RFC 7515 2 / RFC 4648 5 without padding; refuses padding, other alphabets and non-zero trailing bits."""
+    if not isinstance(s, str) or not _B64URL.fullmatch(s) or len(s) % 4 == 1:
+        raise ValueError("not unpadded base64url")
+    raw = base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != s:
+        raise ValueError("non-canonical base64url (trailing bits)")
+    return raw
+
+
+def is_hex64(v):
+    return isinstance(v, str) and _HEX64.fullmatch(v) is not None
+
+
+def canonical_ts(v):
+    """-03 5.3.2 retrieved_at form: UTC, Z, exactly three fractional digits, a valid instant, no leap second."""
+    if not isinstance(v, str):
+        return False
+    m = _TS.fullmatch(v)
+    if not m:
+        return False
+    y, mo, d, h, mi, s = (int(m.group(i)) for i in range(1, 7))
+    if not (1 <= mo <= 12 and 0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
+        return False
+    leap = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+    mdays = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]
+    return 1 <= d <= mdays
+
+
+def _jcs_string(s):
+    out = ['"']
+    for ch in s:
+        c = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif c < 0x20:
+            out.append("\\u%04x" % c)
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def jcs_string_object(obj):
+    """RFC 8785 for an object whose values are all strings (the only shape the accepted record may take here).
+    Members sorted by their UTF-16 code units (RFC 8785 3.2.3)."""
+    keys = sorted(obj, key=lambda k: k.encode("utf-16-be"))
+    body = ",".join(_jcs_string(k) + ":" + _jcs_string(obj[k]) for k in keys)
+    return ("{" + body + "}").encode("utf-8")
+
+
+# ---------------------------------------------------------------- input grammar (relying-party side)
+
+def _validate_inputs(case, notes):
+    if not isinstance(case, dict):
+        raise InputError("case is not a JSON object")
+    extra = set(case) - CASE_MEMBERS
+    if extra:
+        raise InputError("unknown case member(s): %s" % sorted(extra))
+    rec = case.get("accepted_record")
+    if not isinstance(rec, dict):
+        raise InputError("accepted_record absent or not an object")
+    extra = set(rec) - RECORD_MEMBERS
+    if extra:
+        raise InputError("unknown accepted_record member(s): %s" % sorted(extra))
+    missing = RECORD_REQUIRED - set(rec)
+    if missing:
+        raise InputError("accepted_record lacks %s" % sorted(missing))
+    for k, v in rec.items():
+        if not isinstance(v, str):
+            raise InputError("accepted_record.%s is not a string" % k)
+    for k in ("terms_sha256", "outcome_sha256"):
+        if not is_hex64(rec[k]):
+            raise InputError("accepted_record.%s is not 64 lowercase hex" % k)
+    if not canonical_ts(rec["outcome_at"]):
+        raise InputError("accepted_record.outcome_at is not in canonical form")
+    for k in ("issuer", "issuer_kid") + (("record_id",) if "record_id" in rec else ()):
+        if rec[k] == "":
+            raise InputError("accepted_record.%s is empty" % k)
+
+    if "trust_material_complete" in case and not isinstance(case["trust_material_complete"], bool):
+        raise InputError("trust_material_complete is not a boolean")
+
+    keys = None
+    if "trust_material" in case:
+        tm = case["trust_material"]
+        if not isinstance(tm, dict) or set(tm) != {"keys"} or not isinstance(tm["keys"], list):
+            raise InputError("trust_material must be exactly {\"keys\": [...]}")
+        keys = {}
+        for i, jwk in enumerate(tm["keys"]):
+            if not isinstance(jwk, dict):
+                raise InputError("trust_material.keys[%d] is not an object" % i)
+            if jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519":
+                raise InputError("trust_material.keys[%d] is not an OKP/Ed25519 JWK" % i)
+            kid = jwk.get("kid")
+            if not isinstance(kid, str) or kid == "":
+                raise InputError("trust_material.keys[%d].kid absent, empty or not a string" % i)
+            if kid in keys:
+                raise InputError("duplicate kid %r in trust_material" % kid)
+            try:
+                x = b64url_strict(jwk.get("x"))
+            except ValueError as e:
+                raise InputError("trust_material.keys[%d].x: %s" % (i, e))
+            if not ed.point_valid(x):
+                raise InputError("trust_material.keys[%d].x is not a valid Ed25519 public key" % i)
+            for k in sorted(set(jwk) - JWK_UNDERSTOOD):
+                notes.append("jwk_member_ignored:%s:%s (RFC 7517 section 4)" % (kid, k))
+            keys[kid] = x
+
+    deleg = None
+    if "delegation" in case:
+        deleg = case["delegation"]
+        if not isinstance(deleg, dict):
+            raise InputError("delegation is not an object")
+        for party, kids in deleg.items():
+            if party == "" or not isinstance(kids, list) or not all(isinstance(k, str) and k for k in kids):
+                raise InputError("delegation[%r] must be a list of non-empty kid strings" % party)
+            if len(set(kids)) != len(kids):
+                raise InputError("delegation[%r] lists a kid twice" % party)
+
+    if "acceptance" in case:
+        if keys is None:
+            raise InputError("acceptance supplied without trust_material")
+        if deleg is None:
+            raise InputError("acceptance supplied without delegation material")
+    return rec, keys, deleg
+
+
+# ---------------------------------------------------------------- the check
+
+def _report(result, conditions=(), disposition=None, key_step=None, policy_refusal=False, notes=(), reasons=()):
+    conds = sorted(set(conditions))
+    return {"result": result, "conditions": conds, "disposition": disposition, "key_step": key_step,
+            "policy_refusal": policy_refusal, "exit": EXIT[result], "notes": list(notes), "reasons": list(reasons)}
+
+
+def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposition_always=False):
+    """Evaluate one case. The three keyword switches reproduce the alternative readings the README at 646588c
+    left open (README, "Result"); the defaults are the readings stated in the README at 5a4ea06."""
+    notes = []
+    try:
+        rec, keys, deleg = _validate_inputs(case, notes)
+    except InputError as e:
+        return _report("input_error", reasons=[str(e)])
+    complete = case.get("trust_material_complete", False)   # -03 5.4.2: default is "not complete"
+
+    if "acceptance" not in case:                              # README: no_record
+        return _report("no_record", disposition="not_responded", notes=notes)
+
+    env = case["acceptance"]
+    # -- envelope (RFC 7515 flattened JSON serialization, protected header only)
+    reasons = []
+    hdr = None
+    if not isinstance(env, dict):
+        reasons.append("acceptance is not a JWS JSON object")
+    elif set(env) != ENVELOPE_MEMBERS:
+        reasons.append("acceptance members must be exactly protected, payload, signature; got %s" % sorted(env))
+    else:
+        try:
+            hdr = strict_json(b64url_strict(env["protected"]).decode("utf-8"))
+            if not isinstance(hdr, dict):
+                raise ValueError("protected header is not an object")
+        except (ValueError, UnicodeError) as e:
+            reasons.append("protected header: %s" % e)
+            hdr = None
+        if hdr is not None:
+            if hdr.get("alg") != "EdDSA":
+                reasons.append("alg is not EdDSA")
+            if not isinstance(hdr.get("kid"), str) or hdr.get("kid") == "":
+                reasons.append("kid absent, empty or not a string")
+            if "crit" in hdr:
+                reasons.append("crit present: this checker understands no header extension (RFC 7515 4.1.11)")
+            for k in sorted(set(hdr) - HEADER_UNDERSTOOD - {"crit"}):
+                notes.append("header_parameter_ignored:%s (RFC 7515 section 4)" % k)
+        for m in ("payload", "signature"):
+            try:
+                b64url_strict(env[m])
+            except ValueError as e:
+                reasons.append("%s: %s" % (m, e))
+    if reasons:
+        return _report("malformed", ["acceptance_envelope_invalid"], notes=notes, reasons=reasons)
+
+    # -- key step, -03 5.4.2
+    kid = hdr["kid"]
+    if kid not in keys:
+        return _report("key_unresolved", key_step="key_unresolved", policy_refusal=bool(complete), notes=notes)
+    pub = keys[kid]
+    signing_input = (env["protected"] + "." + env["payload"]).encode("ascii")
+    if not ed.verify(pub, signing_input, b64url_strict(env["signature"])):
+        if sig_invalid_as_token:
+            return _report("signature_invalid", key_step="signature_invalid", notes=notes)
+        return _report("malformed", ["signature_invalid"], key_step="signature_invalid", notes=notes)
+    key_step = "signature_verified"
+
+    # -- payload
+    try:
+        pl = strict_json(b64url_strict(env["payload"]).decode("utf-8"))
+        if not isinstance(pl, dict):
+            raise ValueError("payload is not a JSON object")
+    except (ValueError, UnicodeError) as e:
+        return _report("malformed", ["acceptance_envelope_invalid"], key_step=key_step, notes=notes,
+                       reasons=["payload: %s" % e])
+
+    ver = pl.get("acceptance_version")
+    if not isinstance(ver, str):
+        return _report("malformed", ["acceptance_member_invalid"], key_step=key_step, notes=notes,
+                       reasons=["acceptance_version absent or not a string"])
+    if ver != VERSION:
+        return _report("unknown", ["acceptance_version_unsupported"], key_step=key_step, notes=notes,
+                       reasons=["acceptance_version %r not implemented" % ver])
+
+    conds, reasons = [], []
+    for k in sorted(set(pl) - PAYLOAD_MEMBERS):
+        conds.append("acceptance_member_unknown")
+        reasons.append("unknown payload member %r" % k)
+
+    def typed_sha(name):
+        v = pl.get(name)
+        ok = isinstance(v, str) if sha256_any_string else is_hex64(v)
+        if not ok:
+            conds.append("acceptance_member_invalid")
+            reasons.append("%s absent or not 64 lowercase hex" % name)
+        return ok
+
+    terms_ok = typed_sha("terms_sha256")
+    outcome_ok = typed_sha("outcome_sha256")
+    record_ok = typed_sha("accepted_record_sha256")
+
+    at_ok = canonical_ts(pl.get("accepted_at"))
+    if not at_ok:
+        conds.append("acceptance_member_invalid")
+        reasons.append("accepted_at absent or not in canonical form")
+
+    disp = pl.get("disposition")
+    disp_ok = disp in DISPOSITIONS_SIGNED and isinstance(disp, str)
+    if not disp_ok:
+        conds.append("acceptance_member_invalid")
+        reasons.append("disposition absent, not_responded, or not one of accepted/rejected/disputed")
+
+    cp = pl.get("confirming_party")
+    cp_ok = False
+    if cp is None or cp == "":
+        conds.append("confirming_party_absent")
+    elif not isinstance(cp, str):
+        conds.append("acceptance_member_invalid")
+        reasons.append("confirming_party is not a string")
+    else:
+        cp_ok = True
+
+    # acceptance_signer_is_issuer, README A5 (any one of three)
+    issuer_pub = keys.get(rec["issuer_kid"])
+    same_key = kid == rec["issuer_kid"] or (issuer_pub is not None and issuer_pub == pub)
+    same_party = cp_ok and cp == rec["issuer"]
+    delegated_to_issuer = kid in deleg.get(rec["issuer"], [])
+    if same_key or same_party or delegated_to_issuer:
+        conds.append("acceptance_signer_is_issuer")
+
+    if terms_ok and pl["terms_sha256"] != rec["terms_sha256"]:
+        conds.append("acceptance_terms_digest_mismatch")
+    if outcome_ok and pl["outcome_sha256"] != rec["outcome_sha256"]:
+        conds.append("acceptance_outcome_digest_mismatch")
+    if at_ok and pl["accepted_at"] < rec["outcome_at"]:      # both canonical: bytewise = chronological
+        conds.append("acceptance_precedes_outcome")
+    if record_ok and pl["accepted_record_sha256"] != hashlib.sha256(jcs_string_object(rec)).hexdigest():
+        conds.append("acceptance_record_digest_mismatch")
+
+    if conds:
+        return _report("malformed", conds, disposition=(disp if disposition_always and disp_ok else None),
+                       key_step=key_step, notes=notes, reasons=reasons)
+
+    if kid not in deleg.get(cp, []):                          # README A6
+        return _report("unknown", ["acceptance_authority_unresolved"], disposition=disp, key_step=key_step,
+                       notes=notes)
+    return _report("verified", disposition=disp, key_step=key_step, notes=notes)
+
+
+def main(argv):
+    if len(argv) != 2:
+        sys.stderr.write("usage: acceptance_check.py CASE.json\n")
+        return 3
+    try:
+        fd = os.open(argv[1], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise ValueError("not a regular file")
+            case = strict_json(f.read().decode("utf-8"))
+    except (OSError, ValueError, UnicodeError) as e:
+        rep = _report("input_error", reasons=["cannot read case: %s" % e])
+    else:
+        rep = check(case)
+    sys.stdout.write(json.dumps(rep, indent=1, sort_keys=True) + "\n")
+    return rep["exit"]
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

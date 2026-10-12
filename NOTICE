@@ -1,0 +1,5 @@
+x402-acceptance-check-omega
+Copyright 2026 Roberto Locatelli
+
+Licensed under the MIT License (LICENSE-MIT) or the Apache License, Version 2.0 (LICENSE-APACHE), at your option.
+Third-party inputs (vectors, RFC 8032, draft-krausz-verification-state-03) are not included; fetch_sources.py downloads them and checks pinned sha256 values.

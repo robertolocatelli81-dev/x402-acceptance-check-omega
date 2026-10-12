@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 Roberto Locatelli
+"""Ed25519 verification (RFC 8032 Section 5.1), pure Python, standard library only.
+
+Written from the normative text of RFC 8032 Sections 5.1 to 5.1.7: field and curve constants (5.1),
+encoding (5.1.2), decoding with the single-exponentiation square root of 5.1.3 step 2, the extended-coordinate
+addition and doubling formulas printed in 5.1.4, key generation (5.1.5), signing (5.1.6, used by the tests
+only) and verification (5.1.7). The Python illustration of RFC 8032 Section 6 is not used.
+
+Strict decoding: y >= p, a non-square x^2, or x = 0 with x_0 = 1 is a decoding failure (5.1.3), and a
+signature whose S is not below L is invalid (5.1.7 step 1). Verification checks [S]B = R + [k]A', the
+cofactorless equation that 5.1.7 step 3 allows as sufficient, by comparing the two encodings; points of
+small order are not rejected (RFC 8032 does not require it). Not constant time: verification and test
+signing only.
+"""
+import hashlib
+
+p = 2 ** 255 - 19                                                   # 5.1
+L = 2 ** 252 + 27742317777372353535851937790883648493               # 5.1, order of B
+d = (-121665 * pow(121666, p - 2, p)) % p                           # 5.1, d = -121665/121666
+_I = pow(2, (p - 1) // 4, p)                                        # 5.1.3 step 3.2, 2^((p-1)/4)
+_NEUTRAL = (0, 1, 1, 0)                                             # 5.1.4, (0, Z, Z, 0) with Z = 1
+
+
+def _h512(data):
+    return hashlib.sha512(data).digest()
+
+
+def _decode_point(enc):
+    """5.1.3: returns extended coordinates, or None when decoding fails."""
+    if not isinstance(enc, (bytes, bytearray)) or len(enc) != 32:
+        return None
+    n = int.from_bytes(bytes(enc), "little")
+    x_0 = n >> 255                                                  # step 1
+    y = n & ((1 << 255) - 1)
+    if y >= p:
+        return None
+    u = (y * y - 1) % p                                             # step 2
+    v = (d * y * y + 1) % p
+    x = u * pow(v, 3, p) * pow(u * pow(v, 7, p), (p - 5) // 8, p) % p
+    vxx = v * x * x % p                                             # step 3
+    if vxx == u:
+        pass
+    elif vxx == (-u) % p:
+        x = x * _I % p
+    else:
+        return None
+    if x == 0 and x_0 == 1:                                         # step 4
+        return None
+    if x % 2 != x_0:
+        x = p - x
+    return (x, y, 1, x * y % p)
+
+
+def _encode_point(P):
+    """5.1.2: y little-endian, with the low bit of x in the top bit of the last octet."""
+    X, Y, Z, _ = P
+    zi = pow(Z, p - 2, p)
+    x, y = X * zi % p, Y * zi % p
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _add(P1, P2):
+    """5.1.4 addition formulas (complete for a = -1, non-square d)."""
+    X1, Y1, Z1, T1 = P1
+    X2, Y2, Z2, T2 = P2
+    a = (Y1 - X1) * (Y2 - X2) % p
+    b = (Y1 + X1) * (Y2 + X2) % p
+    c = T1 * 2 * d * T2 % p
+    dd = Z1 * 2 * Z2 % p
+    e, f, g, h = b - a, dd - c, dd + c, b + a
+    return (e * f % p, g * h % p, f * g % p, e * h % p)            # X3, Y3, Z3, T3
+
+
+def _double(P1):
+    """5.1.4 doubling formulas."""
+    X1, Y1, Z1, _ = P1
+    a = X1 * X1 % p
+    b = Y1 * Y1 % p
+    c = 2 * Z1 * Z1 % p
+    h = a + b
+    e = h - (X1 + Y1) * (X1 + Y1)
+    g = a - b
+    f = c + g
+    return (e * f % p, g * h % p, f * g % p, e * h % p)            # X3, Y3, Z3, T3
+
+
+def _scalar_mul(k, P):
+    """[k]P, most significant bit first."""
+    R = _NEUTRAL
+    for i in range(k.bit_length() - 1, -1, -1):
+        R = _double(R)
+        if (k >> i) & 1:
+            R = _add(R, P)
+    return R
+
+
+_B = _decode_point((4 * pow(5, p - 2, p)).to_bytes(32, "little"))   # 5.1: y = 4/5, x positive (x_0 = 0)
+
+
+def point_valid(pub):
+    """True iff pub is a 32-octet string that decodes to a curve point (5.1.3)."""
+    return _decode_point(pub) is not None
+
+
+def _expand(private_key):
+    """5.1.5 steps 1-3: the pruned scalar s and the upper half of the hash (the prefix of 5.1.6)."""
+    h = _h512(bytes(private_key)) if len(private_key) == 32 else None
+    if h is None:
+        raise ValueError("private key must be 32 octets")
+    s = int.from_bytes(h[:32], "little")
+    s &= ~7                                                         # clear the lowest three bits
+    s &= (1 << 255) - 1                                             # clear bit 255
+    s |= 1 << 254                                                   # set bit 254
+    return s, h[32:]
+
+
+def public_key(private_key):
+    s, _ = _expand(private_key)
+    return _encode_point(_scalar_mul(s, _B))                        # 5.1.5 step 4
+
+
+def sign(private_key, msg):
+    """5.1.6 (used by the tests only)."""
+    s, prefix = _expand(private_key)
+    A = _encode_point(_scalar_mul(s, _B))
+    r = int.from_bytes(_h512(prefix + msg), "little") % L          # step 2
+    R = _encode_point(_scalar_mul(r, _B))                           # step 3
+    k = int.from_bytes(_h512(R + A + msg), "little") % L           # step 4
+    S = (r + k * s) % L                                             # step 5
+    return R + S.to_bytes(32, "little")                             # step 6
+
+
+def verify(pub, msg, sig):
+    """5.1.7. Returns True or False; never raises on bytes input."""
+    if len(pub) != 32 or len(sig) != 64:
+        return False
+    R_enc, S_enc = sig[:32], sig[32:]
+    A = _decode_point(pub)                                          # step 1
+    R = _decode_point(R_enc)
+    S = int.from_bytes(S_enc, "little")
+    if A is None or R is None or S >= L:
+        return False
+    k = int.from_bytes(_h512(R_enc + pub + msg), "little") % L      # step 2
+    return _encode_point(_scalar_mul(S, _B)) == _encode_point(_add(R, _scalar_mul(k, A)))   # step 3
