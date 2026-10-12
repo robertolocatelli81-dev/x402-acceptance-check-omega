@@ -20,7 +20,10 @@ of this grammar is a number), so the verdict does not depend on the Python versi
 or on PYTHONINTMAXSTRDIGITS.
 
 Python 3 standard library only. Usage: python3 acceptance_check.py CASE.json  (a JSON object = the "case").
-Exit: 0 verified, 2 unknown / key_unresolved / no_record, 1 malformed, 3 input outside the grammar.
+Exit: 0 verified, 2 unknown / key_unresolved / no_record, 1 malformed, 3 input outside the grammar,
+74 the receipt was not written whole to stdout (for example stdout closed, a full device, a file size limit,
+a reader that went away, a non-blocking pipe that is full; also with -u or PYTHONUNBUFFERED), whatever the
+verdict; one line "receipt not written: <reason>" is then tried on stderr. A usage error exits 3.
 """
 import base64
 import hashlib
@@ -36,6 +39,7 @@ VERSION = "acceptance-record-v0"                      # README A1
 DISPOSITIONS_SIGNED = ("accepted", "rejected", "disputed")   # A2: not_responded is never signed
 EXIT = {"verified": 0, "unknown": 2, "key_unresolved": 2, "no_record": 2, "malformed": 1,
         "signature_invalid": 1, "input_error": 3}
+EXIT_RECEIPT_NOT_WRITTEN = 74                         # sysexits.h EX_IOERR
 
 CASE_MEMBERS = {"acceptance", "accepted_record", "delegation", "trust_material", "trust_material_complete"}
 RECORD_MEMBERS = {"issuer", "issuer_kid", "terms_sha256", "outcome_sha256", "outcome_at", "record_id"}
@@ -445,9 +449,52 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
     return _report("verified", disposition=disp, key_step=key_step, notes=notes)
 
 
+def _quiet_fd(fd):
+    """Point fd at /dev/null, so that the interpreter's own flush at exit cannot fail again on it."""
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, fd)
+        os.close(null)
+    except OSError:
+        pass
+
+
+def _say(text):
+    """Write text to stderr (line-buffered or unbuffered from Python 3.9 on, so a line ending in a newline is
+    written at once); if stderr is closed or fails, give up without raising."""
+    try:
+        if sys.stderr is None:
+            return
+        sys.stderr.write(text)
+    except (OSError, ValueError):
+        _quiet_fd(2)
+
+
+def _write_receipt(text):
+    """Write the whole receipt to stdout and flush it; raise OSError if it did not all get there.
+
+    The bytes go to sys.stdout.buffer in a loop: with -u or PYTHONUNBUFFERED that is a raw FileIO, whose write()
+    can write only part of the data and return the count (a file size limit, a reader that went away, a
+    non-blocking pipe) without raising, and the text layer drops the rest in silence."""
+    if sys.stdout is None:
+        raise OSError("stdout is closed")
+    try:
+        sys.stdout.flush()
+        out = sys.stdout.buffer
+        data = memoryview(text.encode(sys.stdout.encoding, sys.stdout.errors))
+        while data:
+            n = out.write(data)
+            if not n:
+                raise OSError("short write: %d bytes not written" % len(data))
+            data = data[n:]
+        out.flush()
+    except ValueError as e:                                  # I/O operation on closed file
+        raise OSError(str(e))
+
+
 def main(argv):
     if len(argv) != 2:
-        sys.stderr.write("usage: acceptance_check.py CASE.json\n")
+        _say("usage: acceptance_check.py CASE.json\n")
         return 3
     try:
         fd = os.open(argv[1], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
@@ -459,7 +506,12 @@ def main(argv):
         rep = _report("input_error", reasons=["cannot read case: %s" % e])
     else:
         rep = check(case)
-    sys.stdout.write(json.dumps(rep, indent=1, sort_keys=True) + "\n")
+    try:
+        _write_receipt(json.dumps(rep, indent=1, sort_keys=True) + "\n")
+    except OSError as e:
+        _quiet_fd(1)
+        _say("receipt not written: %s\n" % e)
+        return EXIT_RECEIPT_NOT_WRITTEN
     return rep["exit"]
 
 

@@ -62,10 +62,13 @@ The 27 vectors do not exercise the four sentences of 2026-10-12: this version an
 python3 fetch_sources.py           # downloads the vectors, three READMEs, RFC 7515, RFC 8032 and the draft into fonti/, checks sha256
 python3 misura_vettori.py fonti/d750291_vectors.json
 python3 acceptance_check.py CASE.json    # one case; exit 0 verified, 2 unknown/key_unresolved/no_record,
-                                         # 1 malformed, 3 input outside the grammar
+                                         # 1 malformed, 3 input outside the grammar,
+                                         # 74 receipt not written whole to stdout (any verdict)
 python3 test_generativi.py && python3 test_nemesis.py && python3 test_ed25519.py && python3 test_piccolo_ordine.py
+python3 test_ricevuta.py             # the receipt is written whole, or exit 74 (real processes, no mocks)
 python3 controlli.py                 # positive controls: altered vectors, source mutants
 python3 mutanti_v2.py                # mutants of the lines changed on 2026-10-12, against the whole suite
+python3 mutanti_ricevuta.py          # mutants of the lines that write the receipt, against test_ricevuta.py
 ```
 
 ## Inputs the README now settles (2026-10-12)
@@ -101,7 +104,15 @@ Where the texts are still silent, the choices are ours and no vector pins them:
 - the protected header and the payload are read strictly: duplicate member names and a lone surrogate (RFC 7493), a
   byte order mark and `NaN`/`Infinity` (RFC 8259), and nesting deeper than 64 levels (our limit) make them not decode
   to a JSON object, so sentence 2 applies;
-- an `x` that is not unpadded base64url or not 32 octets is `input_error`.
+- an `x` that is not unpadded base64url or not 32 octets is `input_error`;
+- `accepted_at` (signed, in the acceptance) and `outcome_at` (in the accepted record) must have the form
+  `YYYY-MM-DDTHH:MM:SS.mmmZ`: what -03 Section 5.3.2 asks of `retrieved_at` (an RFC 3339 timestamp in UTC with the
+  `Z` designator, exactly three fractional-second digits, a valid instant: month 01-12, a day that exists in that
+  month and year, hour 00-23, minute 00-59, second 00-59, no second 60), and also an upper-case `T` and `Z`, which
+  -03 does not state (RFC 3339 Section 5.6 allows `t` and `z`). Otherwise `accepted_at` makes the acceptance malformed
+  `acceptance_member_invalid`, found after the signature is checked (`key_step` `signature_verified`), and
+  `outcome_at` is `input_error`, because the accepted record is input of the relying party and is checked before
+  the signature.
 
 Two choices follow a text rather than our reading: with `acceptance_version` wrong, the other malformed conditions are
 still reported (the README's report-all, "Evaluation order" step 2); a trust-material `x` of 32 octets that does not
@@ -114,10 +125,28 @@ read): a `kid` that is the empty string (`key_unresolved` there), `crit` in the 
 is not an object, overlaps the protected header, holds `crit`, or a `signatures` member (`verified` there), `alg` and
 `kid` only in `header` (malformed there), and a payload with a duplicate member, a lone surrogate, a byte order mark,
 `NaN` or deep nesting (`verified` there, the last duplicate taken).
-- input of the relying party outside the grammar (unknown members of the case, of `accepted_record` or of
-  `trust_material`, no `trust_material` or no `delegation` next to an acceptance, no `accepted_record`) is
-  `input_error`, exit 3, not one of the five result tokens. JSON nested deeper than 64 levels is refused; JSON
-  numbers are never converted, so the verdict does not depend on `PYTHONINTMAXSTRDIGITS`.
+
+Input of the relying party outside the grammar is `input_error`, exit 3, not one of the five result tokens. It is
+checked before the acceptance is read, so no signature is checked. These are all the cases in the code:
+
+- the case file cannot be read, is not a regular file, is not UTF-8, or is not strict JSON (a duplicate member name,
+  a lone surrogate, a byte order mark, `NaN`/`Infinity`/`-Infinity`, nesting deeper than 64 levels), or the case is
+  not a JSON object;
+- a case member other than `acceptance`, `accepted_record`, `delegation`, `trust_material` and
+  `trust_material_complete`;
+- `accepted_record` absent or not an object; a member of it other than `issuer`, `issuer_kid`, `terms_sha256`,
+  `outcome_sha256`, `outcome_at` and `record_id`; one of the first five absent; a member that is not a string;
+  `terms_sha256` or `outcome_sha256` not 64 lowercase hex characters; `outcome_at` not in the form above; `issuer`,
+  `issuer_kid` or a present `record_id` empty;
+- `trust_material_complete` present and not a boolean (`"true"` included);
+- `trust_material` not exactly `{"keys": [...]}`; a key that is not an object, not `kty` `OKP` with `crv`
+  `Ed25519`, or whose `kid` is absent, empty or not a string; two keys with the same `kid`; an `x` that is absent,
+  not a string, not unpadded base64url (padding, another alphabet, non-zero trailing bits) or not 32 octets;
+- `delegation` not an object; a party that is the empty string, or whose value is not a list of non-empty strings,
+  or lists a `kid` twice;
+- an `acceptance` without `trust_material` or without `delegation`.
+
+JSON numbers are never converted, so the verdict does not depend on `PYTHONINTMAXSTRDIGITS`.
 
 ## Not covered
 
@@ -127,6 +156,22 @@ holds strings only). Ed25519 here is not constant time and uses the cofactorless
 mixed order (a large-order point plus a small-order one) are not refused, as neither text asks for it.
 
 ## Changes
+
+**2026-10-12 (after `0496d58`): exit 74 when the receipt is not written.** If the receipt cannot be written whole to
+stdout (stdout closed, a full device, a file size limit, a reader that has gone away, a non-blocking pipe that is
+full), the exit code is now 74 (`EX_IOERR` of sysexits.h) whatever the verdict, also with `-u` or
+`PYTHONUNBUFFERED` (stdout is then a raw file whose writes can be short without an error, so the receipt is written
+in a loop that checks the count), and one line `receipt not written: <reason>` is tried on stderr; if stderr fails
+too, the exit code is still 74, with no traceback. At `0496d58`, measured on Python 3.9, 3.11 and 3.13: with stdout
+closed (`>&-`) the exit code was 1, the code of `malformed`, with an `AttributeError` traceback, also on a `verified`
+case; with stdout on `/dev/full` or on a pipe whose reader had closed it was 120 (the interpreter's own flush at
+exit) for the receipts of a few hundred bytes, and 1 with a traceback for a `verified` receipt of 168 177 bytes; a
+usage error with stderr closed exited 1 instead of 3. Verdicts and receipts are unchanged: the receipts written to a
+file for the 77 cases of `fonti/` (27 at `d750291`, 25 at `646588c`, 25 at `5a4ea06`) have the same bytes and exit
+codes before and after on all three versions, and the 27 vectors give 27/27. `test_ricevuta.py` fails on `0496d58`
+(383 failed checks) and passes now; `mutanti_ricevuta.py` kills 17/17 mutants of the new lines. With
+`PYTHONUNBUFFERED=1` and a file size limit of 4096 bytes (`ulimit -f 4`), the `verified` receipt of 168 177 bytes
+was cut to 4096 bytes with exit 0 at `0496d58`; now it exits 74.
 
 **2026-10-12 (after `fd88fbb`).** The defect reported on x402-foundation/tsc#4 was in this checker too. At
 `fd88fbb`, with the neutral point as the confirming party's key in the trust material, the signature `R` = neutral
