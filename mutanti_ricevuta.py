@@ -26,7 +26,9 @@ MUTANTS = [
     ("BlockingIOError of a buffered stdout not waited for",
      "                n = e.characters_written\n                waited = True\n", "                raise OSError(str(e))\n"),
     ("receipt written through the text layer (as at c3e44ef)",
-     "        fd = buf.fileno()\n", "        out.write(text); out.flush(); return\n"),
+     "        if os.linesep != \"\\n\":", "        out.write(text); out.flush(); return\n        if os.linesep != \"\\n\":"),
+    ("descriptor asked for before writing (no receipt on a TextIOWrapper over BytesIO)",
+     "        data = memoryview(", "        buf.fileno()\n        data = memoryview("),
     ("no text-layer fallback when stdout has no .buffer (StringIO)",
      "        if buf is None:                                      # an in-process text stream (StringIO): no bytes below it\n"
      "            out.write(text)\n            out.flush()\n            return\n", ""),
@@ -55,6 +57,14 @@ MUTANTS = [
      "        except BaseException:\n            os.close(fd)\n            raise\n        with os.fdopen(fd, \"rb\") as f:\n",
      "        with os.fdopen(fd, \"rb\") as f:\n            if not stat.S_ISREG(os.fstat(fd).st_mode):\n"
      "                raise ValueError(\"not a regular file\")\n"),
+    ("flush on a full non-blocking pipe not waited for",
+     "            except BlockingIOError:\n                _wait_writable(buf)\n",
+     "            except ZeroDivisionError:\n                _wait_writable(buf)\n"),
+    ("flush loop spins instead of waiting", "            except BlockingIOError:\n                _wait_writable(buf)\n",
+     "            except BlockingIOError:\n                pass\n"),
+    ("write loop spins instead of waiting", "            if data and waited:\n                _wait_writable(buf)\n",
+     "            if data and waited:\n                pass\n"),
+    ("select with a zero timeout (spins)", "select.select([], [buf.fileno()], [])", "select.select([], [buf.fileno()], [], 0)"),
 ]
 
 

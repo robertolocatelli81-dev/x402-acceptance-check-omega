@@ -221,6 +221,45 @@ def main():
         check("%s non-blocking pipe never read: the checker is still waiting after 1.5 s" % envname,
               waiting and err == b"" and expected["verified_big"][1].startswith(got) and 0 < len(got) < len(expected["verified_big"][1]),
               "exited rc=%r, %d bytes in the pipe, stderr %r" % (p.returncode, len(got), err[-120:]))
+        # a non-blocking pipe already full before the checker starts, a small receipt: with a buffered stdout the
+        # whole receipt fits the buffer and the full pipe is met at the flush; read after 1.5 s it arrives whole.
+        # While it waits the checker must sleep in select, not spin (CPU time from /proc, Linux).
+        r, w = os.pipe()
+        fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+        pre = 0
+        while True:
+            try:
+                pre += os.write(w, b"P" * 4096)
+            except BlockingIOError:
+                break
+        for k in ("verified", "verified_big"):
+            if k == "verified_big":                          # the large receipt: the pipe starts empty
+                r, w = os.pipe()
+                fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
+                pre = 0
+            p = subprocess.Popen([sys.executable, "-B", AC, paths[k]], stdout=w, stderr=subprocess.PIPE, env=env)
+            os.close(w)
+            time.sleep(1.5)
+            cpu = None
+            if os.path.exists("/proc/%d/stat" % p.pid):
+                st = open("/proc/%d/stat" % p.pid).read().rsplit(")", 1)[1].split()
+                cpu = (int(st[11]) + int(st[12])) / float(os.sysconf("SC_CLK_TCK"))
+            waiting = p.poll() is None
+            check("%s %s: waiting on a full non-blocking pipe after 1.5 s" % (envname, k), waiting, "rc=%r" % p.returncode)
+            check("%s %s: the wait sleeps (CPU < 0.6 s of 1.5 s)" % (envname, k), cpu is not None and cpu < 0.6,
+                  "cpu=%r s" % cpu)
+            got = b""
+            while True:
+                b = os.read(r, 1 << 16)
+                if not b:
+                    break
+                got += b
+            os.close(r)
+            err = p.stderr.read()
+            p.wait(timeout=120)
+            check("%s %s: pre-filled pipe read late: receipt whole, the verdict's code" % (envname, k),
+                  p.returncode == expected[k][0] and got[pre:] == expected[k][1] and err == b"",
+                  "rc=%r, %d of %d bytes, stderr %r" % (p.returncode, len(got) - pre, len(expected[k][1]), err[-120:]))
         p = subprocess.Popen([sys.executable, "-B", AC, paths["verified_big"]], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, env=env)
         time.sleep(0.5)
@@ -239,6 +278,21 @@ def main():
         except ValueError:
             rc, text = None, None
         check(k + " sys.stdout StringIO: verdict and the whole receipt", rc == expected[k][0] and
+              text is not None and text.encode() == expected[k][1] and p.stderr == b"", repr((p.returncode, p.stderr[-200:])))
+
+    # main() in process with sys.stdout a TextIOWrapper over an io.BytesIO (pytest's capsys): a byte stream with no
+    # descriptor; the receipt goes to it whole (no fileno() is needed unless a non-blocking stdout must be waited for)
+    code = ("import io, sys, json, acceptance_check as ac; s = io.TextIOWrapper(io.BytesIO(), encoding='UTF-8', newline='', "
+            "write_through=True); sys.stdout = s; rc = ac.main(['x', sys.argv[1]]); sys.stdout = sys.__stdout__; "
+            "sys.stdout.write(json.dumps([rc, s.buffer.getvalue().decode()]))")
+    for k in ("verified", "malformed", "verified_big"):
+        p = subprocess.run([sys.executable, "-B", "-c", code, paths[k]], cwd=HERE, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=120)
+        try:
+            rc, text = json.loads(p.stdout.decode())
+        except ValueError:
+            rc, text = None, None
+        check(k + " sys.stdout TextIOWrapper(BytesIO): verdict and the whole receipt", rc == expected[k][0] and
               text is not None and text.encode() == expected[k][1] and p.stderr == b"", repr((p.returncode, p.stderr[-200:])))
 
     for args in ([], ["a", "b"]):

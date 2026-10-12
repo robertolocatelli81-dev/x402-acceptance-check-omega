@@ -485,13 +485,14 @@ def _say(text):
         _quiet(err)
 
 
-def _wait_writable(fd):
+def _wait_writable(buf):
     """stdout is non-blocking and full: wait until it can take more, as a blocking write would (the reader is slow,
-    not gone). `select` is interruptible and retried by Python itself (PEP 475)."""
+    not gone). `select` is interruptible and retried by Python itself (PEP 475). The descriptor is asked for only
+    here: a byte stream with no descriptor (an io.BytesIO under a TextIOWrapper, as pytest's capsys) never blocks."""
     import select
     try:
-        select.select([], [fd], [])
-    except (OSError, ValueError) as e:                      # a descriptor select cannot wait on: give up, report
+        select.select([], [buf.fileno()], [])
+    except (OSError, ValueError) as e:                      # no descriptor, or one select cannot wait on: report
         raise OSError("stdout is non-blocking and cannot be waited for: %s" % e)
 
 
@@ -513,7 +514,6 @@ def _write_receipt(text):
             out.write(text)
             out.flush()
             return
-        fd = buf.fileno()
         if os.linesep != "\n":                               # the text layer translates "\n" on such platforms
             text = text.replace("\n", os.linesep)
         data = memoryview(text.encode(out.encoding or "utf-8", out.errors or "strict"))
@@ -530,13 +530,13 @@ def _write_receipt(text):
                 raise OSError("short write: %d bytes not written" % len(data))
             data = data[n:]
             if data and waited:
-                _wait_writable(fd)
+                _wait_writable(buf)
         while True:
             try:
                 buf.flush()
                 return
             except BlockingIOError:
-                _wait_writable(fd)
+                _wait_writable(buf)
     except ValueError as e:                                  # I/O operation on closed file, or text it cannot encode
         raise OSError(str(e))
 
