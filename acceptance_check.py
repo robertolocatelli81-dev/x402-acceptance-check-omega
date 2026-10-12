@@ -24,8 +24,9 @@ or on PYTHONINTMAXSTRDIGITS.
 Python 3 standard library only. Usage: python3 acceptance_check.py CASE.json  (a JSON object = the "case").
 Exit: 0 verified, 2 unknown / key_unresolved / no_record, 1 malformed, 3 input outside the grammar,
 74 the receipt was not written whole to stdout (for example stdout closed, a full device, a file size limit,
-a reader that went away, a non-blocking pipe that is full; also with -u or PYTHONUNBUFFERED), whatever the
-verdict; one line "receipt not written: <reason>" is then tried on stderr. A usage error exits 3.
+a reader that went away; also with -u or PYTHONUNBUFFERED), whatever the verdict; one line "receipt not
+written: <reason>" is then tried on stderr. A non-blocking stdout that is full is waited for, as a blocking write
+would be, not reported. A usage error exits 3.
 """
 import base64
 import hashlib
@@ -453,12 +454,21 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
     return _report("verified", disposition=disp, key_step=key_step, notes=notes)
 
 
-def _quiet_fd(fd):
-    """Point fd at /dev/null, so that the interpreter's own flush at exit cannot fail again on it."""
+def _quiet(stream):
+    """Point the descriptor BEHIND `stream` at the null device, so that the bytes the stream still buffers cannot fail
+    again at the interpreter's own flush at exit (that second failure is what turned the exit code into 120). The
+    descriptor is taken from the stream itself, never from a fixed number: with fd 1 closed at start, the number 1 may
+    by now belong to a file this process opened for another purpose."""
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):          # no descriptor behind it: nothing buffered in the OS sense
+        return
     try:
         null = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(null, fd)
-        os.close(null)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
     except OSError:
         pass
 
@@ -466,33 +476,68 @@ def _quiet_fd(fd):
 def _say(text):
     """Write text to stderr (line-buffered or unbuffered from Python 3.9 on, so a line ending in a newline is
     written at once); if stderr is closed or fails, give up without raising."""
+    err = sys.stderr
     try:
-        if sys.stderr is None:
+        if err is None:
             return
-        sys.stderr.write(text)
+        err.write(text)
     except (OSError, ValueError):
-        _quiet_fd(2)
+        _quiet(err)
+
+
+def _wait_writable(fd):
+    """stdout is non-blocking and full: wait until it can take more, as a blocking write would (the reader is slow,
+    not gone). `select` is interruptible and retried by Python itself (PEP 475)."""
+    import select
+    try:
+        select.select([], [fd], [])
+    except (OSError, ValueError) as e:                      # a descriptor select cannot wait on: give up, report
+        raise OSError("stdout is non-blocking and cannot be waited for: %s" % e)
 
 
 def _write_receipt(text):
     """Write the whole receipt to stdout and flush it; raise OSError if it did not all get there.
 
-    The bytes go to sys.stdout.buffer in a loop: with -u or PYTHONUNBUFFERED that is a raw FileIO, whose write()
-    can write only part of the data and return the count (a file size limit, a reader that went away, a
-    non-blocking pipe) without raising, and the text layer drops the rest in silence."""
-    if sys.stdout is None:
+    The bytes go to sys.stdout.buffer in a loop that checks the count: with -u or PYTHONUNBUFFERED that is a raw
+    FileIO, whose write() can be short (a file size limit, a reader that went away) or return None (a non-blocking
+    pipe that is full) without raising, and the text layer drops the rest in silence. A non-blocking stdout is
+    waited for, not given up on. The bytes are the ones the text layer would write (its encoding and error handler,
+    its newline translation where the platform has one), so a receipt on a file is byte for byte the same."""
+    out = sys.stdout
+    if out is None:
         raise OSError("stdout is closed")
     try:
-        sys.stdout.flush()
-        out = sys.stdout.buffer
-        data = memoryview(text.encode(sys.stdout.encoding, sys.stdout.errors))
+        out.flush()
+        buf = getattr(out, "buffer", None)
+        if buf is None:                                      # an in-process text stream (StringIO): no bytes below it
+            out.write(text)
+            out.flush()
+            return
+        fd = buf.fileno()
+        if os.linesep != "\n":                               # the text layer translates "\n" on such platforms
+            text = text.replace("\n", os.linesep)
+        data = memoryview(text.encode(out.encoding or "utf-8", out.errors or "strict"))
         while data:
-            n = out.write(data)
-            if not n:
+            try:
+                n = buf.write(data)
+                waited = False
+            except BlockingIOError as e:                     # buffered stdout on a full non-blocking pipe: part taken
+                n = e.characters_written
+                waited = True
+            if n is None:                                    # raw stdout on a full non-blocking pipe: nothing taken
+                n, waited = 0, True
+            if n < 0 or n > len(data) or (n == 0 and not waited):
                 raise OSError("short write: %d bytes not written" % len(data))
             data = data[n:]
-        out.flush()
-    except ValueError as e:                                  # I/O operation on closed file
+            if data and waited:
+                _wait_writable(fd)
+        while True:
+            try:
+                buf.flush()
+                return
+            except BlockingIOError:
+                _wait_writable(fd)
+    except ValueError as e:                                  # I/O operation on closed file, or text it cannot encode
         raise OSError(str(e))
 
 
@@ -502,9 +547,13 @@ def main(argv):
         return 3
     try:
         fd = os.open(argv[1], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):        # checked on the descriptor, before any read: the
+                raise ValueError("not a regular file")        # reason never names a descriptor number
+        except BaseException:
+            os.close(fd)
+            raise
         with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                raise ValueError("not a regular file")
             case = strict_json(f.read().decode("utf-8"))
     except (OSError, ValueError, UnicodeError) as e:
         rep = _report("input_error", reasons=["cannot read case: %s" % e])
@@ -513,7 +562,7 @@ def main(argv):
     try:
         _write_receipt(json.dumps(rep, indent=1, sort_keys=True) + "\n")
     except OSError as e:
-        _quiet_fd(1)
+        _quiet(sys.stdout)
         _say("receipt not written: %s\n" % e)
         return EXIT_RECEIPT_NOT_WRITTEN
     return rep["exit"]

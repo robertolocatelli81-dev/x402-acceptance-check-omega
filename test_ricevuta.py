@@ -10,7 +10,10 @@ an input_error case and a verified case whose receipt is larger than 64 KiB, wit
   - and the same three with stderr closed or full as well; main() is also called with sys.stdout closed,
   - to `| head -c 0`, the checker started 0.2 s after head (50 runs per case),
   - with PYTHONUNBUFFERED=1 and without: under `ulimit -f 4`, to `| head -c 100`, to a non-blocking pipe read
-    after 1 s and to one never read (the large receipt), and to a slow pipe (whole),
+    after 1 s (the large receipt arrives whole: the checker waits for the reader, as a blocking write would) and to
+    one never read (the checker is still waiting after 1.5 s, like `cat` would be), and to a slow pipe (whole),
+  - in process, with sys.stdout a StringIO (no bytes below it: the receipt goes through the text layer),
+  - on a directory: the input_error reason is "not a regular file", the same bytes whatever descriptor was free,
 and, in each mode where the receipt is lost, the exit code must be 74 with one line "receipt not written: ..."
 on stderr when stderr works, and no traceback. The usage error keeps exit 3 with stderr closed.
 
@@ -96,11 +99,14 @@ def main():
         expected[k] = (rep["exit"], (json.dumps(rep, indent=1, sort_keys=True) + "\n").encode())
     paths["input_error"] = os.path.join(d, "a_directory")
     os.mkdir(paths["input_error"])
-    rc, body, _ = run_bash(paths["input_error"], '>"$OUT"', d)   # its reason names an fd number: taken from a run
+    rc, body, _ = run_bash(paths["input_error"], '>"$OUT"', d)
     rep = json.loads(body.decode()) if body else {}
     check("input_error receipt", rep.get("result") == "input_error" and
-          rep.get("reasons", [""])[0].startswith("cannot read case: [Errno 21]"), repr(body))
+          rep.get("reasons", [""]) == ["cannot read case: not a regular file"], repr(body))
     expected["input_error"] = (3, body)
+    # the reason must not name the descriptor the case was opened on (2 when stderr is closed, 3 otherwise)
+    rc, body2, _ = run_bash(paths["input_error"], '>"$OUT" 2>&-', d)
+    check("input_error receipt the same with stderr closed", rc == 3 and body2 == body, repr(body2))
     check("big receipt > 64 KiB", len(expected["verified_big"][1]) > 65536, str(len(expected["verified_big"][1])))
     check("verdicts", [expected[k][0] for k in ("verified", "malformed", "input_error", "verified_big")] == [0, 1, 3, 0],
           str({k: v[0] for k, v in expected.items()}))
@@ -190,29 +196,50 @@ def main():
         os.close(r)
         err = p.stderr.read()
         p.wait(timeout=120)
-        check("%s non-blocking pipe: receipt whole or 74" % envname,
-              (p.returncode == 74) or (p.returncode == 0 and got == expected["verified_big"][1]),
-              "rc=%r, %d bytes" % (p.returncode, len(got)))
-        if p.returncode == 74:
-            lost("%s non-blocking pipe" % envname, p.returncode, err)
+        check("%s non-blocking pipe read after 1 s: receipt whole, the verdict's code" % envname,
+              p.returncode == 0 and got == expected["verified_big"][1] and err == b"",
+              "rc=%r, %d of %d bytes, stderr %r" % (p.returncode, len(got), len(expected["verified_big"][1]), err[-120:]))
         r, w = os.pipe()                                     # non-blocking pipe kept open and never read
         fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_NONBLOCK)
         p = subprocess.Popen([sys.executable, "-B", AC, paths["verified_big"]], stdout=w, stderr=subprocess.PIPE,
                              env=env)
         os.close(w)
-        try:
-            err = p.communicate(timeout=60)[1]
-        except subprocess.TimeoutExpired:
-            p.kill()
-            err = p.communicate()[1]
+        time.sleep(1.5)
+        waiting = p.poll() is None                           # the checker waits for the reader (as a blocking write)
+        p.kill()
+        err = p.communicate()[1]
+        got = b""
+        while True:
+            try:
+                b = os.read(r, 1 << 16)
+            except BlockingIOError:
+                break
+            if not b:
+                break
+            got += b
         os.close(r)
-        lost("%s non-blocking pipe never read" % envname, p.returncode, err)
+        check("%s non-blocking pipe never read: the checker is still waiting after 1.5 s" % envname,
+              waiting and err == b"" and expected["verified_big"][1].startswith(got) and 0 < len(got) < len(expected["verified_big"][1]),
+              "exited rc=%r, %d bytes in the pipe, stderr %r" % (p.returncode, len(got), err[-120:]))
         p = subprocess.Popen([sys.executable, "-B", AC, paths["verified_big"]], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, env=env)
         time.sleep(0.5)
         o, e = p.communicate(timeout=120)
         check("%s slow pipe whole" % envname, p.returncode == 0 and o == expected["verified_big"][1],
               "rc=%r, %d bytes" % (p.returncode, len(o)))
+
+    # main() in process with sys.stdout a text stream without .buffer (a StringIO): the receipt goes through it
+    code = ("import io, sys, json, acceptance_check as ac; s = io.StringIO(); sys.stdout = s; rc = ac.main(['x', sys.argv[1]]); "
+            "sys.stdout = sys.__stdout__; sys.stdout.write(json.dumps([rc, s.getvalue()]))")
+    for k in ("verified", "malformed", "verified_big"):
+        p = subprocess.run([sys.executable, "-B", "-c", code, paths[k]], cwd=HERE, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=120)
+        try:
+            rc, text = json.loads(p.stdout.decode())
+        except ValueError:
+            rc, text = None, None
+        check(k + " sys.stdout StringIO: verdict and the whole receipt", rc == expected[k][0] and
+              text is not None and text.encode() == expected[k][1] and p.stderr == b"", repr((p.returncode, p.stderr[-200:])))
 
     for args in ([], ["a", "b"]):
         p = subprocess.run(["bash", "-c", '"$@" 2>&-', "x", sys.executable, "-B", AC] + args,

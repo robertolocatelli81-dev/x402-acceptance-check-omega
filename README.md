@@ -75,7 +75,8 @@ python3 misura_vettori.py fonti/d750291_vectors.json
 python3 misura_vettori.py fonti/536681b_vectors.json   # 45/46: acc-complete-not-boolean is input_error here (sentence 8)
 python3 acceptance_check.py CASE.json    # one case; exit 0 verified, 2 unknown/key_unresolved/no_record,
                                          # 1 malformed, 3 input outside the grammar,
-                                         # 74 receipt not written whole to stdout (any verdict)
+                                         # 74 receipt not written whole to stdout (any verdict; a non-blocking
+                                         #    stdout that is full is waited for, not reported)
 python3 test_generativi.py && python3 test_nemesis.py && python3 test_ed25519.py && python3 test_piccolo_ordine.py
 python3 test_frase5.py               # sentence 5: outcome_at of another form is malformed, after the key step
 python3 test_ricevuta.py             # the receipt is written whole, or exit 74 (real processes, no mocks)
@@ -187,6 +188,28 @@ mixed order (a large-order point plus a small-order one) are not refused, as nei
 
 ## Changes
 
+**2026-10-12 (after `951d4fe`): the receipt on a non-blocking stdout, the reason on a directory.** Three
+changes to how the receipt is written, none to a verdict: (1) a non-blocking stdout that is full (a pipe whose
+`O_NONBLOCK` flag this process inherited, read late) is now waited for with `select`, as a blocking write would be,
+and the receipt arrives whole with the verdict's exit code; at `951d4fe` the write stopped at the first `EAGAIN`,
+65 536 of the 168 177 bytes of the large `verified` receipt had reached the pipe and the exit was 74, and with a
+pipe never read the exit was 74 too, where the checker now waits (measured: still waiting after 1.5 s, like `cat`).
+(2) The receipt goes to `sys.stdout.buffer` only when there is one: a program that calls `main()` with
+`sys.stdout` set to a text stream without `.buffer` (a `StringIO`) gets the receipt through that stream (at
+`951d4fe`: `AttributeError`, exit 1). (3) The `input_error` reason for a case path that is not a regular file is
+`cannot read case: not a regular file`; at `951d4fe` the check came after the descriptor was wrapped, and the reason
+named the descriptor number (`[Errno 21] Is a directory: 3`, or `2` with stderr closed), so the receipt depended on
+which descriptor was free. On POSIX nothing else in the bytes changes; where the platform's text layer translates
+`\n` the bytes now follow `os.linesep`, as `print` did (not measured: Linux only here). After a failed write the
+descriptor pointed at the null device is the one behind the stream object, never the number 1 or 2 (with fd 1
+closed at start, that number can belong to a file this process opened). `test_ricevuta.py`: 9 checks fail at
+`951d4fe` (the two non-blocking cases with and without `PYTHONUNBUFFERED`, the `StringIO` case on three inputs,
+the directory reason with and without stderr) and 382 at `0496d58`, none now, on Python 3.9, 3.11 and 3.13;
+`mutanti_ricevuta.py` kills 20/20 (the mutant that gives up on `EAGAIN`, the one without the `StringIO` fallback and
+the one that checks the regular file after wrapping the descriptor are new). The 77 receipts of `fonti/` written
+to a file are byte-identical to `0496d58`; of the six `input_error`/usage cases, only the directory differs, as
+said.
+
 **2026-10-12 (after `951d4fe`): sentence 5, `outcome_at`.** An `outcome_at` of another spelling than
 `YYYY-MM-DDTHH:MM:SS.mmmZ` was `input_error` (exit 3, no signature checked), a reading of ours; the README at
 `0abf726` (sentence 5) makes it malformed `acceptance_member_invalid`, found after the key step, and this checker
@@ -203,8 +226,8 @@ before and after. Sentences 6 and 7 were measured and already held; sentence 8 i
 `fetch_sources.py` pins the README at `0abf726` and the vectors at `536681b`.
 
 **2026-10-12 (after `0496d58`): exit 74 when the receipt is not written.** If the receipt cannot be written whole to
-stdout (stdout closed, a full device, a file size limit, a reader that has gone away, a non-blocking pipe that is
-full), the exit code is now 74 (`EX_IOERR` of sysexits.h) whatever the verdict, also with `-u` or
+stdout (stdout closed, a full device, a file size limit, a reader that has gone away; a non-blocking pipe that is
+full too, until the entry above), the exit code is now 74 (`EX_IOERR` of sysexits.h) whatever the verdict, also with `-u` or
 `PYTHONUNBUFFERED` (stdout is then a raw file whose writes can be short without an error, so the receipt is written
 in a loop that checks the count), and one line `receipt not written: <reason>` is tried on stderr; if stderr fails
 too, the exit code is still 74, with no traceback. At `0496d58`, measured on Python 3.9, 3.11 and 3.13: with stdout

@@ -17,31 +17,44 @@ AC = "acceptance_check.py"
 TEST = "test_ricevuta.py"
 
 MUTANTS = [
-    ("no flush of the receipt", "            data = data[n:]\n        out.flush()\n", "            data = data[n:]\n"),
-    ("one write, short count ignored", "        while data:\n            n = out.write(data)\n",
-     "        while data:\n            n = out.write(data) or len(data)\n            n = len(data)\n"),
-    ("short write of 0/None not refused", "            if not n:\n                raise OSError(\"short write: %d bytes not written\" % len(data))\n", ""),
+    ("no flush of the receipt", "                buf.flush()\n                return\n", "                return\n"),
+    ("one write, short count ignored", "            try:\n                n = buf.write(data)\n                waited = False\n",
+     "            try:\n                buf.write(data)\n                n = len(data)\n                waited = False\n"),
+    ("raw write returning None (EAGAIN) not waited for",
+     "            if n is None:                                    # raw stdout on a full non-blocking pipe: nothing taken\n                n, waited = 0, True\n",
+     "            if n is None:\n                raise OSError(\"EAGAIN\")\n"),
+    ("BlockingIOError of a buffered stdout not waited for",
+     "                n = e.characters_written\n                waited = True\n", "                raise OSError(str(e))\n"),
     ("receipt written through the text layer (as at c3e44ef)",
-     "        out = sys.stdout.buffer\n", "        sys.stdout.write(text); sys.stdout.flush(); return\n"),
-    ("write error not caught", "    except OSError as e:\n        _quiet_fd(1)\n",
-     "    except ZeroDivisionError as e:\n        _quiet_fd(1)\n"),
+     "        fd = buf.fileno()\n", "        out.write(text); out.flush(); return\n"),
+    ("no text-layer fallback when stdout has no .buffer (StringIO)",
+     "        if buf is None:                                      # an in-process text stream (StringIO): no bytes below it\n"
+     "            out.write(text)\n            out.flush()\n            return\n", ""),
+    ("write error not caught", "    except OSError as e:\n        _quiet(sys.stdout)\n",
+     "    except ZeroDivisionError as e:\n        _quiet(sys.stdout)\n"),
     ("exit with the verdict when the receipt is lost", "        return EXIT_RECEIPT_NOT_WRITTEN\n",
      "        return rep[\"exit\"]\n"),
     ("exit 1 when the receipt is lost", "EXIT_RECEIPT_NOT_WRITTEN = 74", "EXIT_RECEIPT_NOT_WRITTEN = 1"),
     ("exit 0 when the receipt is lost", "EXIT_RECEIPT_NOT_WRITTEN = 74", "EXIT_RECEIPT_NOT_WRITTEN = 0"),
-    ("stdout None not checked", "    if sys.stdout is None:\n        raise OSError(\"stdout is closed\")\n", ""),
-    ("fd 1 left as it is after the failure", "        _quiet_fd(1)\n        _say(", "        _say("),
-    ("no dup2 in _quiet_fd", "        os.dup2(null, fd)\n", ""),
+    ("stdout None not checked", "    if out is None:\n        raise OSError(\"stdout is closed\")\n", ""),
+    ("stdout left as it is after the failure", "        _quiet(sys.stdout)\n        _say(", "        _say("),
+    ("no dup2 in _quiet (the try body stays: pass)", "            os.dup2(null, fd)\n", "            pass\n"),
     ("no stderr line", "        _say(\"receipt not written: %s\\n\" % e)\n", ""),
-    ("stderr None not checked", "        if sys.stderr is None:\n            return\n", ""),
-    ("stderr error not caught", "    except (OSError, ValueError):\n        _quiet_fd(2)\n",
-     "    except ZeroDivisionError:\n        _quiet_fd(2)\n"),
-    ("fd 2 left as it is after a stderr failure", "    except (OSError, ValueError):\n        _quiet_fd(2)\n",
+    ("stderr None not checked", "        if err is None:\n            return\n", ""),
+    ("stderr error not caught", "    except (OSError, ValueError):\n        _quiet(err)\n",
+     "    except ZeroDivisionError:\n        _quiet(err)\n"),
+    ("stderr left as it is after a stderr failure", "    except (OSError, ValueError):\n        _quiet(err)\n",
      "    except (OSError, ValueError):\n        pass\n"),
     ("usage written without the guard", "        _say(\"usage: acceptance_check.py CASE.json\\n\")\n",
      "        sys.stderr.write(\"usage: acceptance_check.py CASE.json\\n\")\n"),
     ("ValueError of a closed stdout not converted", "    except ValueError as e:                                  # I/O",
      "    except ZeroDivisionError as e:                           # I/O"),
+    ("regular-file check after fdopen: the reason names a descriptor number",
+     "        try:\n            if not stat.S_ISREG(os.fstat(fd).st_mode):        # checked on the descriptor, before any read: the\n"
+     "                raise ValueError(\"not a regular file\")        # reason never names a descriptor number\n"
+     "        except BaseException:\n            os.close(fd)\n            raise\n        with os.fdopen(fd, \"rb\") as f:\n",
+     "        with os.fdopen(fd, \"rb\") as f:\n            if not stat.S_ISREG(os.fstat(fd).st_mode):\n"
+     "                raise ValueError(\"not a regular file\")\n"),
 ]
 
 
