@@ -5,7 +5,9 @@ A third implementation of the acceptance-record conditions discussed in
 [babyblueviper1/preaction-governance-conformance](https://github.com/babyblueviper1/preaction-governance-conformance/tree/d750291/examples/acceptance-record-cold)
 (`vectors.json` at `d750291`, 27 vectors, sha256 `4d01f3e72bdcbcca9e3e2a883ced0a87ae6c969f5cf6de4ef754dc63eb8ced0e`;
 also the 25 vectors at `646588c` and `5a4ea06`, the same bytes, sha256
-`c7f5513a6292a8cb7a8049b30113ed9bb786843717c62e7f806c73843c04e7e0`). The checker and its tests use the Python 3 standard library only; the
+`c7f5513a6292a8cb7a8049b30113ed9bb786843717c62e7f806c73843c04e7e0`; and, since 2026-10-12, the 46 vectors at
+`536681b`, sha256 `464ee7933a17c3ab52db32b93ac21f555a026781f4a8a132b91977eb4fb02882`: 45/46, the one disagreement
+being `acc-complete-not-boolean`, sentence 8 below, a choice of ours). The checker and its tests use the Python 3 standard library only; the
 `cryptography` package is used, when installed, only by the optional cross-checks in `test_ed25519.py` and
 `confronto_cryptography.py`.
 
@@ -16,7 +18,9 @@ also the 25 vectors at `646588c` and `5a4ea06`, the same bytes, sha256
 - draft-krausz-verification-state-03, Sections 5.3.2, 5.4.1 and 5.4.2;
 - RFC 8032, Section 5.1 (Ed25519) and the Section 7.1 test vectors;
 - since 2026-10-12: the README of `examples/acceptance-record-cold` at `90b5032` (the section "Inputs the vectors
-  do not yet pin", sentences 1-4, and "Changes between versions"), and RFC 7515, Sections 4.1.11, 7.2.1 and 7.2.2.
+  do not yet pin", sentences 1-4, and "Changes between versions"), and RFC 7515, Sections 4.1.11, 7.2.1 and 7.2.2;
+- since 2026-10-12, later the same day: that README at `0abf726` (sentences 5-8, the sentence-8 table and "Changes
+  between versions") and the 46 vectors at `536681b`.
 
 While this checker was written (2026-10-11), only the README and `vectors.json` of
 `examples/acceptance-record-cold` were opened in that repository: not the reference checker
@@ -52,6 +56,13 @@ With the three points read the other way (`--variant sig --variant sha --variant
 `acc-illtyped-digest-suppresses-mismatch` (22/25 at `646588c`). A checker that always answers
 `verified`/`accepted` (`--always-accept`) gets 3/27 on the same runner (3/25 at `646588c`).
 
+`python3 misura_vettori.py fonti/536681b_vectors.json` (46 vectors, sentences 5, 6 and 8 among them): 45/46 (result
+45/46, conditions 46/46, disposition 8/8, key_step 11/12, policy_refusal 2/3) on Python 3.9.25, 3.11.2 and
+3.13.15. The one disagreement is `acc-complete-not-boolean`: `trust_material_complete: "true"` is `input_error`
+here, where the vector expects `key_unresolved` with `policy_refusal: null` (sentence 8 leaves that choice to the
+relying party, and the README's table at `0abf726` records it for this checker). At `951d4fe`, before the
+sentence-5 change below, it was 44/46: `acc-outcome-at-no-fraction` was `input_error` too.
+
 The 27 vectors do not exercise the four sentences of 2026-10-12: this version and `fd88fbb` both give 27/27.
 `test_piccolo_ordine.py` and the rows of `test_generativi.py` marked "sentence" do: both files fail on `fd88fbb`
 (11 of the 14 "sentence" rows; the version rows `null`, `0` and a list were already malformed there).
@@ -59,12 +70,14 @@ The 27 vectors do not exercise the four sentences of 2026-10-12: this version an
 ## Run
 
 ```
-python3 fetch_sources.py           # downloads the vectors, three READMEs, RFC 7515, RFC 8032 and the draft into fonti/, checks sha256
+python3 fetch_sources.py           # downloads four vector files, four READMEs, RFC 7515, RFC 8032 and the draft into fonti/, checks sha256
 python3 misura_vettori.py fonti/d750291_vectors.json
+python3 misura_vettori.py fonti/536681b_vectors.json   # 45/46: acc-complete-not-boolean is input_error here (sentence 8)
 python3 acceptance_check.py CASE.json    # one case; exit 0 verified, 2 unknown/key_unresolved/no_record,
                                          # 1 malformed, 3 input outside the grammar,
                                          # 74 receipt not written whole to stdout (any verdict)
 python3 test_generativi.py && python3 test_nemesis.py && python3 test_ed25519.py && python3 test_piccolo_ordine.py
+python3 test_frase5.py               # sentence 5: outcome_at of another form is malformed, after the key step
 python3 test_ricevuta.py             # the receipt is written whole, or exit 74 (real processes, no mocks)
 python3 controlli.py                 # positive controls: altered vectors, source mutants
 python3 mutanti_v2.py                # mutants of the lines changed on 2026-10-12, against the whole suite
@@ -86,6 +99,24 @@ The README at `90b5032` adopted four sentences under "Inputs the vectors do not 
    with `policy_refusal: true` if the trust material was declared complete; a signature whose `R` is a small-order
    point is `signature_invalid`.
 
+The README at `0abf726` added sentences 5-8 the same day. Measured here on 2026-10-12 (Python 3.9, 3.11, 3.13):
+
+5. a timestamp, `accepted_at` in the acceptance and `outcome_at` in the supplied record, is `YYYY-MM-DDTHH:MM:SS.mmmZ`
+   exactly, and any other spelling is malformed `acceptance_member_invalid`, found after the key step; ordering
+   (`acceptance_precedes_outcome`) is compared only between two values of that form. Followed since the commit after
+   `951d4fe` for `outcome_at` (it was `input_error`: see Changes); `accepted_at` already was. `test_frase5.py` holds
+   it: 420 checks, 402 of them failing at `951d4fe`;
+6. a protected header whose `alg` is not `EdDSA` (even over a valid Ed25519 signature), or whose `kid` is absent or
+   not a string, is `acceptance_member_invalid` found before the key step: what this checker already returned
+   (measured on the three cases: `key_step` is `null`). A `kid` that is the empty string is not in sentence 6 and
+   stays our reading below;
+7. a payload that is valid JSON but not canonical verifies (measured: members in reverse order, indented), and
+   `confirming_party` is compared byte-exact, so `" "` is a party name and the authority step decides it (measured:
+   `unknown`, `acceptance_authority_unresolved`);
+8. not followed: `trust_material_complete` other than the JSON value `true`, and a `kid` listed twice in the trust
+   material, are `input_error` here, as before. Sentence 8 names this as the relying party's choice and the
+   README's table at `0abf726` records it for this checker.
+
 ## Readings of ours
 
 Up to `fd88fbb` three readings here were ours: an unknown payload member was malformed `acceptance_member_unknown`,
@@ -105,14 +136,13 @@ Where the texts are still silent, the choices are ours and no vector pins them:
   byte order mark and `NaN`/`Infinity` (RFC 8259), and nesting deeper than 64 levels (our limit) make them not decode
   to a JSON object, so sentence 2 applies;
 - an `x` that is not unpadded base64url or not 32 octets is `input_error`;
-- `accepted_at` (signed, in the acceptance) and `outcome_at` (in the accepted record) must have the form
-  `YYYY-MM-DDTHH:MM:SS.mmmZ`: what -03 Section 5.3.2 asks of `retrieved_at` (an RFC 3339 timestamp in UTC with the
-  `Z` designator, exactly three fractional-second digits, a valid instant: month 01-12, a day that exists in that
-  month and year, hour 00-23, minute 00-59, second 00-59, no second 60), and also an upper-case `T` and `Z`, which
-  -03 does not state (RFC 3339 Section 5.6 allows `t` and `z`). Otherwise `accepted_at` makes the acceptance malformed
-  `acceptance_member_invalid`, found after the signature is checked (`key_step` `signature_verified`), and
-  `outcome_at` is `input_error`, because the accepted record is input of the relying party and is checked before
-  the signature.
+- a timestamp (`accepted_at`, `outcome_at`) is `YYYY-MM-DDTHH:MM:SS.mmmZ` as sentence 5 writes it, and this
+  checker also asks for a valid instant, what -03 Section 5.3.2 asks of `retrieved_at` (month 01-12, a day that
+  exists in that month and year, hour 00-23, minute 00-59, second 00-59, no second 60), and reads the `T` and `Z` of
+  the form as upper-case (-03 itself does not state the case; RFC 3339 Section 5.6 allows `t` and `z`). Either one
+  of another spelling makes the acceptance malformed `acceptance_member_invalid`, found after the signature is
+  checked (`key_step` `signature_verified`). An `outcome_at` that is not a string at all is `input_error`, with every
+  other non-string member of the supplied record (the grammar below).
 
 Two choices follow a text rather than our reading: with `acceptance_version` wrong, the other malformed conditions are
 still reported (the README's report-all, "Evaluation order" step 2); a trust-material `x` of 32 octets that does not
@@ -136,8 +166,8 @@ checked before the acceptance is read, so no signature is checked. These are all
   `trust_material_complete`;
 - `accepted_record` absent or not an object; a member of it other than `issuer`, `issuer_kid`, `terms_sha256`,
   `outcome_sha256`, `outcome_at` and `record_id`; one of the first five absent; a member that is not a string;
-  `terms_sha256` or `outcome_sha256` not 64 lowercase hex characters; `outcome_at` not in the form above; `issuer`,
-  `issuer_kid` or a present `record_id` empty;
+  `terms_sha256` or `outcome_sha256` not 64 lowercase hex characters; `issuer`, `issuer_kid` or a present
+  `record_id` empty;
 - `trust_material_complete` present and not a boolean (`"true"` included);
 - `trust_material` not exactly `{"keys": [...]}`; a key that is not an object, not `kty` `OKP` with `crv`
   `Ed25519`, or whose `kid` is absent, empty or not a string; two keys with the same `kid`; an `x` that is absent,
@@ -156,6 +186,21 @@ holds strings only). Ed25519 here is not constant time and uses the cofactorless
 mixed order (a large-order point plus a small-order one) are not refused, as neither text asks for it.
 
 ## Changes
+
+**2026-10-12 (after `951d4fe`): sentence 5, `outcome_at`.** An `outcome_at` of another spelling than
+`YYYY-MM-DDTHH:MM:SS.mmmZ` was `input_error` (exit 3, no signature checked), a reading of ours; the README at
+`0abf726` (sentence 5) makes it malformed `acceptance_member_invalid`, found after the key step, and this checker
+now follows it: with a valid signature the result is `malformed` with `acceptance_member_invalid` (exit 1,
+`key_step` `signature_verified`), with an invalid signature `signature_invalid`, with an unresolved key
+`key_unresolved`, and `acceptance_precedes_outcome` is compared only between two canonical values. `accepted_at`
+was already so. A non-string `outcome_at` stays `input_error`. The 46 vectors at `536681b`: 44/46 at `951d4fe`,
+45/46 now, the remaining disagreement being sentence 8 (above). `test_frase5.py` (19 table rows and a 400-value
+sweep, 420 checks) fails 402 at `951d4fe` and passes now, on Python 3.9, 3.11 and 3.13; the row
+`record-outcome-at-bad` of `test_generativi.py` now expects `acceptance_member_invalid` with
+`acceptance_record_digest_mismatch` (the record changed, so its digest did, A4). The 27 vectors give 27/27 before
+and after, and the receipts of the 77 cases of `fonti/` written to a file have the same bytes and exit codes
+before and after. Sentences 6 and 7 were measured and already held; sentence 8 is not followed (above).
+`fetch_sources.py` pins the README at `0abf726` and the vectors at `536681b`.
 
 **2026-10-12 (after `0496d58`): exit 74 when the receipt is not written.** If the receipt cannot be written whole to
 stdout (stdout closed, a full device, a file size limit, a reader that has gone away, a non-blocking pipe that is

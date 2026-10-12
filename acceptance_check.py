@@ -6,7 +6,9 @@ Written from the README of babyblueviper1/preaction-governance-conformance at 5a
 (examples/acceptance-record-cold/README.md), the condition table posted in x402-foundation/tsc#4 on
 2026-10-04, draft-krausz-verification-state-03 Sections 5.3.2, 5.4.1 and 5.4.2, and RFC 8032 Section 5.1.
 Aligned on 2026-10-12 with the README at 90b5032 (section "Inputs the vectors do not yet pin", sentences 1-4,
-and "Changes between versions") and with RFC 7515 Sections 4.1.11, 7.2.1 and 7.2.2. The code of the other
+and "Changes between versions") and with RFC 7515 Sections 4.1.11, 7.2.1 and 7.2.2; later the same day with the
+README at 0abf726 (sentences 5-7; sentence 8 is left to the relying party and this checker keeps input_error there)
+and the 46 vectors at 536681b. The code of the other
 acceptance-record checkers (the reference one and actaseal's) was not opened, then or before; see the README
 for what else of that repository we had read.
 
@@ -222,8 +224,6 @@ def _validate_inputs(case, notes):
     for k in ("terms_sha256", "outcome_sha256"):
         if not is_hex64(rec[k]):
             raise InputError("accepted_record.%s is not 64 lowercase hex" % k)
-    if not canonical_ts(rec["outcome_at"]):
-        raise InputError("accepted_record.outcome_at is not in canonical form")
     for k in ("issuer", "issuer_kid") + (("record_id",) if "record_id" in rec else ()):
         if rec[k] == "":
             raise InputError("accepted_record.%s is empty" % k)
@@ -405,6 +405,10 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
     if not at_ok:
         conds.append("acceptance_member_invalid")
         reasons.append("accepted_at absent or not in canonical form")
+    out_ok = canonical_ts(rec["outcome_at"])                  # README 0abf726 sentence 5: a string of another
+    if not out_ok:                                            # form is ill-typed, found after the key step
+        conds.append("acceptance_member_invalid")
+        reasons.append("accepted_record.outcome_at not in canonical form")
 
     disp = pl.get("disposition")
     disp_ok = disp in DISPOSITIONS_SIGNED and isinstance(disp, str)
@@ -434,7 +438,7 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
         conds.append("acceptance_terms_digest_mismatch")
     if outcome_ok and pl["outcome_sha256"] != rec["outcome_sha256"]:
         conds.append("acceptance_outcome_digest_mismatch")
-    if at_ok and pl["accepted_at"] < rec["outcome_at"]:      # both canonical: bytewise = chronological
+    if at_ok and out_ok and pl["accepted_at"] < rec["outcome_at"]:   # both canonical: bytewise = chronological
         conds.append("acceptance_precedes_outcome")
     if record_ok and pl["accepted_record_sha256"] != hashlib.sha256(jcs_string_object(rec)).hexdigest():
         conds.append("acceptance_record_digest_mismatch")

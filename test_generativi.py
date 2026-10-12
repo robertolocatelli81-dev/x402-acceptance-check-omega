@@ -320,7 +320,8 @@ TABLE = [
     ("delegation-absent", lambda: {k: v for k, v in base_case().items() if k != "delegation"}, INPUT, "OUR"),
     ("delegation-not-list", lambda: base_case(delegation={"did:example:cp": "cp-A"}), INPUT, "A6 format {party: [kid,...]}"),
     ("record-hash-upper", lambda: setk(base_case(), ["accepted_record", "terms_sha256"], "22" * 31 + "2A"), INPUT, "OUR"),
-    ("record-outcome-at-bad", lambda: setk(base_case(), ["accepted_record", "outcome_at"], "yesterday"), INPUT, "OUR"),
+    ("record-outcome-at-bad", lambda: setk(base_case(), ["accepted_record", "outcome_at"], "yesterday"),
+     mal(MI, "acceptance_record_digest_mismatch"), "README 0abf726 sentence 5; A4: the record changed, its digest too"),
     ("case-not-object", lambda: [], INPUT, "OUR"),
 ]
 
