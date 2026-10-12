@@ -5,12 +5,16 @@
 Written from the README of babyblueviper1/preaction-governance-conformance at 5a4ea06 and 646588c
 (examples/acceptance-record-cold/README.md), the condition table posted in x402-foundation/tsc#4 on
 2026-10-04, draft-krausz-verification-state-03 Sections 5.3.2, 5.4.1 and 5.4.2, and RFC 8032 Section 5.1.
-While it was written (2026-10-11), the code of the other acceptance-record checkers (the reference one and
-actaseal's) was not opened; see the README for what else of that repository we had read before.
+Aligned on 2026-10-12 with the README at 90b5032 (section "Inputs the vectors do not yet pin", sentences 1-4,
+and "Changes between versions") and with RFC 7515 Sections 4.1.11, 7.2.1 and 7.2.2. The code of the other
+acceptance-record checkers (the reference one and actaseal's) was not opened, then or before; see the README
+for what else of that repository we had read.
 
 Closed by construction: every input member is either understood or refused with a reason. The only
-members not refused are those a standard says to ignore (RFC 7515 Section 4: JOSE header parameters
-not listed in "crit"; RFC 7517 Section 4: JWK members), and those are listed in "notes". JSON nested deeper
+members not refused are those a text says to ignore, and those are listed in "notes": members of the
+signed acceptance other than the seven (README sentence 1), JOSE header parameters not listed in "crit"
+(RFC 7515 Section 4), members of the JWS object other than those of RFC 7515 Section 7.2.2 (RFC 7515
+Section 7.2.1), and JWK members (RFC 7517 Section 4). JSON nested deeper
 than MAX_DEPTH levels is refused before it is parsed, and JSON numbers are kept as opaque values (no member
 of this grammar is a number), so the verdict does not depend on the Python version, on the recursion limit
 or on PYTHONINTMAXSTRDIGITS.
@@ -36,7 +40,7 @@ EXIT = {"verified": 0, "unknown": 2, "key_unresolved": 2, "no_record": 2, "malfo
 CASE_MEMBERS = {"acceptance", "accepted_record", "delegation", "trust_material", "trust_material_complete"}
 RECORD_MEMBERS = {"issuer", "issuer_kid", "terms_sha256", "outcome_sha256", "outcome_at", "record_id"}
 RECORD_REQUIRED = {"issuer", "issuer_kid", "terms_sha256", "outcome_sha256", "outcome_at"}
-ENVELOPE_MEMBERS = {"protected", "payload", "signature"}
+ENVELOPE_MEMBERS = {"protected", "header", "payload", "signature"}   # RFC 7515 7.2.2 (flattened)
 PAYLOAD_MEMBERS = {"acceptance_version", "accepted_at", "accepted_record_sha256", "confirming_party",
                    "disposition", "outcome_sha256", "terms_sha256"}
 HEADER_UNDERSTOOD = {"alg", "kid"}
@@ -243,11 +247,20 @@ def _validate_inputs(case, notes):
                 x = b64url_strict(jwk.get("x"))
             except ValueError as e:
                 raise InputError("trust_material.keys[%d].x: %s" % (i, e))
-            if not ed.point_valid(x):
-                raise InputError("trust_material.keys[%d].x is not a valid Ed25519 public key" % i)
+            if len(x) != 32:
+                raise InputError("trust_material.keys[%d].x is not 32 octets (RFC 8037 2)" % i)
             for k in sorted(set(jwk) - JWK_UNDERSTOOD):
                 notes.append("jwk_member_ignored:%s:%s (RFC 7517 section 4)" % (kid, k))
-            keys[kid] = x
+            problem = ed.key_problem(x)
+            if problem == "small-order point":
+                # README sentence 4: a small-order key is not a key of the confirming party (key_unresolved).
+                notes.append("trust_material_key_unusable:%s: %s" % (kid, problem))
+                keys[kid] = None
+            else:
+                if problem is not None:
+                    # RFC 8032 5.1.7 step 1: if the public key does not decode, the signature is invalid.
+                    notes.append("trust_material_key_undecodable:%s: %s" % (kid, problem))
+                keys[kid] = x
 
     deleg = None
     if "delegation" in case:
@@ -290,41 +303,63 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
         return _report("no_record", disposition="not_responded", notes=notes)
 
     env = case["acceptance"]
-    # -- envelope (RFC 7515 flattened JSON serialization, protected header only)
+    # -- envelope: RFC 7515 7.2.2 flattened JSON serialization. README sentence 2: an encoding that is not
+    # base64url without padding, or a protected header that is not a JSON object, is malformed
+    # acceptance_member_invalid, found before the key step. The other envelope defects below (alg, kid,
+    # crit, header, signatures, an absent member) carry the same condition: our reading, the README is silent.
     reasons = []
     hdr = None
     if not isinstance(env, dict):
         reasons.append("acceptance is not a JWS JSON object")
-    elif set(env) != ENVELOPE_MEMBERS:
-        reasons.append("acceptance members must be exactly protected, payload, signature; got %s" % sorted(env))
     else:
-        try:
-            hdr = strict_json(b64url_strict(env["protected"]).decode("utf-8"))
-            if not isinstance(hdr, dict):
-                raise ValueError("protected header is not an object")
-        except (ValueError, UnicodeError) as e:
-            reasons.append("protected header: %s" % e)
-            hdr = None
+        for k in sorted(set(env) - ENVELOPE_MEMBERS - {"signatures"}):
+            notes.append("jws_member_ignored:%s (RFC 7515 section 7.2.1)" % k)
+        if "signatures" in env:
+            reasons.append("signatures present: not the flattened syntax (RFC 7515 7.2.2)")
+        for m in ("protected", "payload", "signature"):
+            if m not in env:
+                reasons.append("%s absent" % m)
+            else:
+                try:
+                    raw = b64url_strict(env[m])
+                except ValueError as e:
+                    reasons.append("%s: %s" % (m, e))
+                    continue
+                if m == "protected":
+                    try:
+                        hdr = strict_json(raw.decode("utf-8"))
+                        if not isinstance(hdr, dict):
+                            raise ValueError("protected header is not a JSON object")
+                    except (ValueError, UnicodeError) as e:
+                        reasons.append("protected header: %s" % e)
+                        hdr = None
+        uhdr = env.get("header", {})
+        if not isinstance(uhdr, dict):
+            reasons.append("header is not a JSON object (RFC 7515 7.2.1)")
+            uhdr = {}
         if hdr is not None:
-            if hdr.get("alg") != "EdDSA":
+            both = sorted(set(hdr) & set(uhdr))
+            if both:
+                reasons.append("header parameter(s) %s in both protected and header (RFC 7515 7.2.1: disjoint)" % both)
+            if "crit" in uhdr:
+                reasons.append("crit in the unprotected header (RFC 7515 4.1.11: protected header only)")
+            jose = dict(uhdr)
+            jose.update(hdr)                                 # RFC 7515 7.2.1: the JOSE Header is the union
+            if jose.get("alg") != "EdDSA":
                 reasons.append("alg is not EdDSA")
-            if not isinstance(hdr.get("kid"), str) or hdr.get("kid") == "":
+            if not isinstance(jose.get("kid"), str) or jose.get("kid") == "":
                 reasons.append("kid absent, empty or not a string")
             if "crit" in hdr:
                 reasons.append("crit present: this checker understands no header extension (RFC 7515 4.1.11)")
-            for k in sorted(set(hdr) - HEADER_UNDERSTOOD - {"crit"}):
+            for k in sorted(set(jose) - HEADER_UNDERSTOOD - {"crit"}):
                 notes.append("header_parameter_ignored:%s (RFC 7515 section 4)" % k)
-        for m in ("payload", "signature"):
-            try:
-                b64url_strict(env[m])
-            except ValueError as e:
-                reasons.append("%s: %s" % (m, e))
+            hdr = jose
     if reasons:
-        return _report("malformed", ["acceptance_envelope_invalid"], notes=notes, reasons=reasons)
+        return _report("malformed", ["acceptance_member_invalid"], notes=notes, reasons=reasons)
 
-    # -- key step, -03 5.4.2
+    # -- key step, -03 5.4.2; README sentence 4: a small-order key resolves to nothing
     kid = hdr["kid"]
-    if kid not in keys:
+    if keys.get(kid) is None:
         return _report("key_unresolved", key_step="key_unresolved", policy_refusal=bool(complete), notes=notes)
     pub = keys[kid]
     signing_input = (env["protected"] + "." + env["payload"]).encode("ascii")
@@ -339,22 +374,16 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
         pl = strict_json(b64url_strict(env["payload"]).decode("utf-8"))
         if not isinstance(pl, dict):
             raise ValueError("payload is not a JSON object")
-    except (ValueError, UnicodeError) as e:
-        return _report("malformed", ["acceptance_envelope_invalid"], key_step=key_step, notes=notes,
+    except (ValueError, UnicodeError) as e:                   # README sentence 2, found after the key step
+        return _report("malformed", ["acceptance_member_invalid"], key_step=key_step, notes=notes,
                        reasons=["payload: %s" % e])
 
-    ver = pl.get("acceptance_version")
-    if not isinstance(ver, str):
-        return _report("malformed", ["acceptance_member_invalid"], key_step=key_step, notes=notes,
-                       reasons=["acceptance_version absent or not a string"])
-    if ver != VERSION:
-        return _report("unknown", ["acceptance_version_unsupported"], key_step=key_step, notes=notes,
-                       reasons=["acceptance_version %r not implemented" % ver])
-
     conds, reasons = [], []
-    for k in sorted(set(pl) - PAYLOAD_MEMBERS):
-        conds.append("acceptance_member_unknown")
-        reasons.append("unknown payload member %r" % k)
+    if pl.get("acceptance_version") != VERSION:                # README sentence 3 (report-all: our reading)
+        conds.append("acceptance_member_invalid")
+        reasons.append("acceptance_version absent, not a string, or not %r" % VERSION)
+    for k in sorted(set(pl) - PAYLOAD_MEMBERS):                # README sentence 1
+        notes.append("acceptance_member_ignored:%s" % k)
 
     def typed_sha(name):
         v = pl.get(name)
@@ -390,7 +419,7 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
         cp_ok = True
 
     # acceptance_signer_is_issuer, README A5 (any one of three)
-    issuer_pub = keys.get(rec["issuer_kid"])
+    issuer_pub = keys.get(rec["issuer_kid"])                 # None if absent or unusable
     same_key = kid == rec["issuer_kid"] or (issuer_pub is not None and issuer_pub == pub)
     same_party = cp_ok and cp == rec["issuer"]
     delegated_to_issuer = kid in deleg.get(rec["issuer"], [])

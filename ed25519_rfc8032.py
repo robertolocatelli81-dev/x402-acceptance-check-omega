@@ -9,9 +9,14 @@ only) and verification (5.1.7). The Python illustration of RFC 8032 Section 6 is
 
 Strict decoding: y >= p, a non-square x^2, or x = 0 with x_0 = 1 is a decoding failure (5.1.3), and a
 signature whose S is not below L is invalid (5.1.7 step 1). Verification checks [S]B = R + [k]A', the
-cofactorless equation that 5.1.7 step 3 allows as sufficient, by comparing the two encodings; points of
-small order are not rejected (RFC 8032 does not require it). Not constant time: verification and test
-signing only.
+cofactorless equation that 5.1.7 step 3 allows as sufficient, by comparing the two encodings.
+
+Points of small order (the 8 points P with [8]P = the neutral point, the neutral point among them) are
+refused as a public key and as R. RFC 8032 does not require either refusal; the README of
+examples/acceptance-record-cold (babyblueviper1/preaction-governance-conformance, sentence 4 adopted on
+2026-10-12) does, because under the neutral key the signature R = neutral, S = 0 verifies every message.
+Their non-canonical encodings (y + p, or x = 0 with the sign bit set) already fail decoding above.
+Not constant time: verification and test signing only.
 """
 import hashlib
 
@@ -103,6 +108,22 @@ def point_valid(pub):
     return _decode_point(pub) is not None
 
 
+def _small_order(P):
+    """True iff [8]P is the neutral point, i.e. the order of P divides 8 (the 8 points of small order)."""
+    return _encode_point(_scalar_mul(8, P)) == _encode_point(_NEUTRAL)
+
+
+def key_problem(pub):
+    """None if pub is usable as an Ed25519 public key here; otherwise the reason: it does not decode
+    (RFC 8032 5.1.3) or it is a point of small order (README sentence 4)."""
+    A = _decode_point(pub)
+    if A is None:
+        return "does not decode (RFC 8032 5.1.3)"
+    if _small_order(A):
+        return "small-order point"
+    return None
+
+
 def _expand(private_key):
     """5.1.5 steps 1-3: the pruned scalar s and the upper half of the hash (the prefix of 5.1.6)."""
     h = _h512(bytes(private_key)) if len(private_key) == 32 else None
@@ -140,6 +161,8 @@ def verify(pub, msg, sig):
     R = _decode_point(R_enc)
     S = int.from_bytes(S_enc, "little")
     if A is None or R is None or S >= L:
+        return False
+    if _small_order(A) or _small_order(R):                          # README sentence 4 (not RFC 8032)
         return False
     k = int.from_bytes(_h512(R_enc + pub + msg), "little") % L      # step 2
     return _encode_point(_scalar_mul(S, _B)) == _encode_point(_add(R, _scalar_mul(k, A)))   # step 3

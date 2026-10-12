@@ -45,7 +45,7 @@ def payload_case(extra_json):
     return tg.base_case(acceptance=tg.envelope(raw_payload=raw))
 
 
-ENV = ("malformed", ["acceptance_envelope_invalid"])
+ENV = ("malformed", ["acceptance_member_invalid"])   # README 90b5032 sentence 2
 VER = ("verified", [])
 
 # 1. depth: the limit is MAX_DEPTH counted from the outer object; the header object is level 1
@@ -73,7 +73,7 @@ check("low recursion limit: ValueError, never RecursionError", _r in ("parsed", 
 # 2. numbers: opaque, never converted, so the verdict does not depend on PYTHONINTMAXSTRDIGITS
 big = "1" + "0" * 5000
 check("header, ignored member = 5001-digit integer: verified", res(hdr_case(big)) == VER)
-check("payload, unknown member = 5001-digit integer", res(payload_case(big)) == ("malformed", ["acceptance_member_unknown"]))
+check("payload, unknown member = 5001-digit integer: ignored, verified", res(payload_case(big)) == VER)
 check("payload, disposition = 1: member_invalid", res(tg.with_payload(disposition=1))[1] == ["acceptance_member_invalid"])
 raw = json.dumps(tg.PAYLOAD).replace('"acceptance-record-v0"', "1").encode()
 check("payload, acceptance_version = 1 (number): member_invalid",
@@ -144,6 +144,17 @@ check("ignored JWK member is listed in notes", r["result"] == "verified" and any
 r = ac.check(tg.base_case(acceptance=tg.envelope(header={"alg": "EdDSA", "kid": "cp-A", "typ": "x"})))
 check("ignored header parameter is listed in notes", r["result"] == "verified" and any("header_parameter_ignored:typ" in n for n in r["notes"]))
 
+c = tg.base_case(); c["acceptance"]["header"] = {"typ": "x"}
+r = ac.check(c)
+check("unprotected header: its parameter noted, the member itself not listed as ignored",
+      r["result"] == "verified" and any("header_parameter_ignored:typ" in n for n in r["notes"])
+      and not any(n.startswith("jws_member_ignored") for n in r["notes"]))
+c = tg.base_case(); c["acceptance"]["zz"] = 1
+r = ac.check(c)
+check("unknown JWS member noted (RFC 7515 7.2.1)", r["result"] == "verified" and any("jws_member_ignored:zz" in n for n in r["notes"]))
+r = ac.check(tg.with_payload(note="hi"))
+check("ignored acceptance member noted (README sentence 1)", any("acceptance_member_ignored:note" in n for n in r["notes"]))
+
 # 5. JCS escapes (RFC 8785 3.2.2.2), expected bytes written by hand
 cases = [({"b": "1", "a": "2"}, b'{"a":"2","b":"1"}'),
          ({"k": "\b\t\n\f\r\"\\"}, b'{"k":"\\b\\t\\n\\f\\r\\"\\\\"}'),
@@ -180,7 +191,7 @@ r0 = 123456789
 R0 = ed._encode_point(ed._scalar_mul(r0, ed._B))
 negR0 = bytes(bytearray(R0[:31]) + bytes([R0[31] ^ 0x80]))
 neutral = (1).to_bytes(32, "little")
-check("neutral key: (R, r) verifies (RFC 8032 does not reject small order)", ed.verify(neutral, b"any", R0 + r0.to_bytes(32, "little")))
+check("neutral key: (R, r) refused (README sentence 4, small-order key)", not ed.verify(neutral, b"any", R0 + r0.to_bytes(32, "little")))
 check("neutral key: (-R, r) is invalid (x sign is compared)", not ed.verify(neutral, b"any", negR0 + r0.to_bytes(32, "little")))
 # k must be reduced mod L before [k]A' (5.1.7 step 2): A' of mixed order makes an unreduced k differ
 T = (0x7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7 | (1 << 255)).to_bytes(32, "little")

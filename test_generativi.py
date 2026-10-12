@@ -79,7 +79,7 @@ def mal(*conds):
 
 
 INPUT = {"result": "input_error"}
-ENV = mal("acceptance_envelope_invalid")
+ENV = mal("acceptance_member_invalid")   # README 90b5032 sentence 2 (was acceptance_envelope_invalid)
 SIGINV = {"result": "malformed", "conditions": ["signature_invalid"], "key_step": "signature_invalid",
           "disposition": None, "policy_refusal": False}
 
@@ -161,12 +161,35 @@ TABLE = [
      VERIFIED, "RFC 7515 4: header params not understood MUST be ignored unless crit (reported in notes)"),
     ("crit-header", lambda: base_case(acceptance=envelope(header={"alg": "EdDSA", "kid": "cp-A", "crit": ["zz"], "zz": 1})),
      ENV, "RFC 7515 4.1.11: crit param not understood -> JWS invalid"),
-    ("unknown-envelope-member", lambda: setk(base_case(), ["acceptance", "header"], {}), ENV,
-     "OUR: flattened JWS without unprotected header only"),
-    ("unknown-payload-member", lambda: with_payload(note="hi"), mal("acceptance_member_unknown"),
-     "OUR: closed payload (text silent; proposed name)"),
+    ("empty-unprotected-header", lambda: setk(base_case(), ["acceptance", "header"], {}), VERIFIED,
+     "RFC 7515 7.2.2: header is a member of the flattened syntax"),
+    ("unknown-envelope-member", lambda: setk(base_case(), ["acceptance", "zz"], 1), VERIFIED,
+     "RFC 7515 7.2.1: additional members not understood MUST be ignored (reported in notes)"),
+    ("envelope-signatures-member", lambda: setk(base_case(), ["acceptance", "signatures"], []), ENV,
+     "RFC 7515 7.2.2: signatures MUST NOT be present"),
+    ("unprotected-header-not-object", lambda: setk(base_case(), ["acceptance", "header"], "x"), ENV,
+     "RFC 7515 7.2.1: header is a JSON object"),
+    ("unprotected-header-overlaps", lambda: setk(base_case(), ["acceptance", "header"], {"kid": "cp-A"}), ENV,
+     "RFC 7515 7.2.1: names MUST be disjoint"),
+    ("unprotected-header-crit", lambda: setk(base_case(), ["acceptance", "header"], {"crit": ["zz"]}), ENV,
+     "RFC 7515 4.1.11: crit only in the protected header"),
+    ("unprotected-header-typ", lambda: setk(base_case(), ["acceptance", "header"], {"typ": "x"}),
+     dict(VERIFIED, notes=["header_parameter_ignored:typ (RFC 7515 section 4)"]),
+     "RFC 7515 4: not understood, ignored (notes)"),
+    ("kid-in-unprotected-header", lambda: setk(base_case(acceptance=envelope(header={"alg": "EdDSA"})),
+                                               ["acceptance", "header"], {"kid": "cp-A"}), VERIFIED,
+     "RFC 7515 7.2.1: the JOSE Header is the union"),
+    ("alg-and-kid-in-unprotected-header", lambda: setk(base_case(acceptance=envelope(raw_header=b"{}")),
+                                                       ["acceptance", "header"], {"alg": "EdDSA", "kid": "cp-A"}),
+     VERIFIED, "RFC 7515 7.2.1: alg and kid from the union (OUR: protected {} accepted)"),
+    ("alg-in-unprotected-header-only-none", lambda: setk(base_case(acceptance=envelope(header={"kid": "cp-A"})),
+                                                         ["acceptance", "header"], {"alg": "none"}), ENV,
+     "OUR: EdDSA only, from the union"),
+    *[("envelope-%s-absent" % m, (lambda m=m: setk(base_case(), ["acceptance", m], DROP)), ENV, "OUR: README sentence 2 names all three")
+      for m in ("protected", "payload", "signature")],
+    ("unknown-payload-member", lambda: with_payload(note="hi"), VERIFIED, "README 90b5032 sentence 1: ignored"),
     ("unknown-payload-member-plus-mismatch", lambda: with_payload(note="hi", terms_sha256="33" * 32),
-     mal("acceptance_member_unknown", "acceptance_terms_digest_mismatch"), "OUR + README report-all"),
+     mal("acceptance_terms_digest_mismatch"), "README sentence 1 + report-all"),
     # --- wrong types / non-canonical digests (README step 2: 64 lowercase hex, suppress the mismatch)
     *[("terms-%s" % n, (lambda v=v: with_payload(terms_sha256=v)), mal(MI), "README step 2 (5a4ea06)")
       for n, v in (("int", 123), ("null", None), ("list", []), ("upper", "AB" * 32), ("63", "a" * 63),
@@ -201,8 +224,11 @@ TABLE = [
     ("cp-int", lambda: with_payload(confirming_party=5), mal(MI), "A3 ill-typed"),
     ("cp-is-issuer", lambda: with_payload(confirming_party="did:example:iss"), mal("acceptance_signer_is_issuer"), "A5 (ii)"),
     ("version-absent", lambda: with_payload(acceptance_version=DROP), mal(MI), "A1 + A3"),
-    ("version-other", lambda: with_payload(acceptance_version="acceptance-record-v1"),
-     {"result": "unknown", "conditions": ["acceptance_version_unsupported"]}, "OUR via -03 5.4.1(h) analogy"),
+    *[("version-%s" % n, (lambda v=v: with_payload(acceptance_version=v)), mal(MI), "README 90b5032 sentence 3")
+      for n, v in (("v1", "acceptance-record-v1"), ("null", None), ("int", 0), ("upper", "ACCEPTANCE-RECORD-V0"),
+                   ("nl", "acceptance-record-v0\n"), ("empty", ""), ("list", ["acceptance-record-v0"]))],
+    ("version-other-plus-mismatch", lambda: with_payload(acceptance_version="v1", terms_sha256="33" * 32),
+     mal(MI, "acceptance_terms_digest_mismatch"), "README sentence 3 + report-all (OUR: version joins report-all)"),
     # --- signer is issuer (A5) and authority (A6)
     ("signed-by-issuer-key", lambda: base_case(acceptance=envelope(header={"alg": "EdDSA", "kid": "iss-A"}, sk=SK_ISS)),
      mal("acceptance_signer_is_issuer"), "A5 (i)"),
@@ -283,7 +309,12 @@ TABLE = [
     ("kid-int", lambda: base_case(acceptance=envelope(header={"alg": "EdDSA", "kid": 1})), ENV, "OUR"),
     ("acceptance-compact-string", lambda: base_case(acceptance="a.b.c"), ENV, "OUR: flattened JSON only"),
     # --- input grammar (relying party)
-    ("jwk-bad-point", lambda: setk(base_case(), ["trust_material", "keys", 1, "x"], b64u(b"\xff" * 32)), INPUT, "RFC 8032 5.1.3"),
+    ("jwk-bad-point", lambda: setk(base_case(), ["trust_material", "keys", 1, "x"], b64u(b"\xff" * 32)),
+     SIGINV, "RFC 8032 5.1.7 step 1: a public key that does not decode makes the signature invalid"),
+    ("jwk-small-order-key", lambda: setk(base_case(), ["trust_material", "keys", 1, "x"], b64u(b"\x01" + b"\x00" * 31)),
+     {"result": "key_unresolved", "key_step": "key_unresolved"}, "README 90b5032 sentence 4: the neutral point as key"),
+    ("jwk-31-octets", lambda: setk(base_case(), ["trust_material", "keys", 1, "x"], b64u(b"\x01" * 31)), INPUT,
+     "OUR: RFC 8037 2, x is 32 octets"),
     ("jwk-dup-kid", lambda: setk(base_case(), ["trust_material", "keys", 0, "kid"], "cp-A"), INPUT, "OUR: ambiguous resolution"),
     ("jwk-x25519", lambda: setk(base_case(), ["trust_material", "keys", 1, "crv"], "X25519"), INPUT, "OUR: Ed25519 only"),
     ("delegation-absent", lambda: {k: v for k, v in base_case().items() if k != "delegation"}, INPUT, "OUR"),
@@ -343,7 +374,7 @@ def fuzz(n=2000, seed=20261011, check=None):
             elif op == 1 and p:
                 p.pop(rnd.choice(sorted(p)))
             elif op == 2:
-                p[rnd.choice(["zz", "Disposition", "terms_sha256 ", "kid", "accepted_record"])] = rnd.choice(WEIRD)
+                p[rnd.choice(["zz", "Disposition", "terms_sha256 ", "kid", "accepted_record", "acceptance_version"])] = rnd.choice(WEIRD)
             else:
                 k = rnd.choice(list(DIGEST_OF))
                 p[k] = "".join(rnd.choice("0123456789abcdef") for _ in range(64))
@@ -359,10 +390,13 @@ def fuzz(n=2000, seed=20261011, check=None):
             viol.append((i, "malformed without condition", p))
         if r["result"] in ("malformed", "key_unresolved") and r.get("disposition") is not None:
             viol.append((i, "disposition on non-clean result (README 5a4ea06)", p))
+        if p.get("acceptance_version") != "acceptance-record-v0" and not (
+                r["result"] == "malformed" and "acceptance_member_invalid" in conds):
+            viol.append((i, "version not acceptance-record-v0, not malformed acceptance_member_invalid (sentence 3)", p))
         if r["result"] == "malformed" and "acceptance_authority_unresolved" in conds:
             viol.append((i, "unknown stacked on malformed (README step 3)", p))
         if r["result"] == "verified":
-            ok = (set(p) == set(PAYLOAD) and p["disposition"] in ("accepted", "rejected", "disputed")
+            ok = (set(p) >= set(PAYLOAD) and p["disposition"] in ("accepted", "rejected", "disputed")
                   and all(p[k] == PAYLOAD[k] for k in ("terms_sha256", "outcome_sha256", "accepted_record_sha256",
                                                        "confirming_party", "acceptance_version"))
                   and ac.canonical_ts(p["accepted_at"]) and p["accepted_at"] >= RECORD["outcome_at"])
@@ -372,7 +406,7 @@ def fuzz(n=2000, seed=20261011, check=None):
             illtyped = k not in p or not ac.is_hex64(p[k])
             if illtyped and cname in conds:
                 viol.append((i, "mismatch reported on ill-typed %s (README step 2)" % k, p))
-            if not illtyped and p.get("acceptance_version") == "acceptance-record-v0":
+            if not illtyped:                         # report-all, the version included (README sentence 3)
                 want = p[k] != (RECORD[k] if k != "accepted_record_sha256" else REC_SHA)
                 if want != (cname in conds):
                     viol.append((i, "report-all: %s presence wrong" % cname, p))

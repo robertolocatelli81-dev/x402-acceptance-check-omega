@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Roberto Locatelli
 """Download the third-party inputs into fonti/ and check each against a pinned sha256.
 They are not redistributed in this repository: the vectors and README belong to
-babyblueviper1/preaction-governance-conformance (vectors CC0-1.0, repository MIT), the RFC and the draft to
+babyblueviper1/preaction-governance-conformance (vectors CC0-1.0, repository MIT), the RFCs and the draft to
 the IETF Trust and their authors. Exit 0 iff every file matches its pin."""
 import hashlib
 import os
@@ -22,6 +22,10 @@ PINS = [
      "9c1b7a7463a7350486d0ccfaa638cd4b8077f027b93280f8f058a5898cc3d419"),
     ("646588c_README.md", BBR % "646588cbab5e3cfe0824af6bb83ee1779f0f67ee",
      "f7731aa1f0670e8a5c897d538edb717ff848fcc05ad65537d95c9ff5d99ebd4a"),
+    ("90b5032_README.md", BBR % "90b5032e0ce8de9400c738fbb1cb2a88f638a129",
+     "7574b1c926f1dc50f766a6becce7db05f8925c2f626a04fe6f4f86788893edf1"),
+    ("rfc7515.txt", "https://www.rfc-editor.org/rfc/rfc7515.txt",
+     "ecbf84674118e62526511c1237e1deaa86aada86d25b247623a2a7e04ae62e40"),
     ("rfc8032.txt", "https://www.rfc-editor.org/rfc/rfc8032.txt",
      "ed63657ff389301282b169b0abde9b5dd2c7e4d524fdfa5da6ff3094fc93c4c3"),
     ("draft-krausz-verification-state-03.txt", "https://www.ietf.org/archive/id/draft-krausz-verification-state-03.txt",
