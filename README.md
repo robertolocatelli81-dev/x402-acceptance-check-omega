@@ -7,7 +7,8 @@ A third implementation of the acceptance-record conditions discussed in
 also the 25 vectors at `646588c` and `5a4ea06`, the same bytes, sha256
 `c7f5513a6292a8cb7a8049b30113ed9bb786843717c62e7f806c73843c04e7e0`; and, since 2026-10-12, the 46 vectors at
 `536681b`, sha256 `464ee7933a17c3ab52db32b93ac21f555a026781f4a8a132b91977eb4fb02882`: 45/46, the one disagreement
-being `acc-complete-not-boolean`, sentence 8 below, a choice of ours). The checker and its tests use the Python 3 standard library only; the
+being `acc-complete-not-boolean`, sentence 8 below, a choice of ours; since 2026-10-13, the 50 vectors at `9d4cf2c`,
+sha256 `c5d0a142cf22b1cfff366fb1b6689de0b0d88ba0ad5cf846db9027204f0c138a`: 49/50, the same one disagreement). The checker and its tests use the Python 3 standard library only; the
 `cryptography` package is used, when installed, only by the optional cross-checks in `test_ed25519.py` and
 `confronto_cryptography.py`.
 
@@ -20,7 +21,12 @@ being `acc-complete-not-boolean`, sentence 8 below, a choice of ours). The check
 - since 2026-10-12: the README of `examples/acceptance-record-cold` at `90b5032` (the section "Inputs the vectors
   do not yet pin", sentences 1-4, and "Changes between versions"), and RFC 7515, Sections 4.1.11, 7.2.1 and 7.2.2;
 - since 2026-10-12, later the same day: that README at `0abf726` (sentences 5-8, the sentence-8 table and "Changes
-  between versions") and the 46 vectors at `536681b`.
+  between versions") and the 46 vectors at `536681b`;
+- since 2026-10-13: that README at `9d4cf2c` (sentence 9 and its "Changes between versions" entry) and the 50 vectors
+  at `9d4cf2c`; the 12 cases of `cases.txt` of
+  [novifinancial/ed25519-speccheck](https://github.com/novifinancial/ed25519-speccheck/blob/65519336fda78a3d016e947df6d82848aca0c9da/cases.txt)
+  at `6551933` ("Taming the many EdDSAs", Apache-2.0), read as data, sha256
+  `db14ccd6953ffa79c81586da8f4ab41dd893f7efd07af97d027a27c179b3ab6b`.
 
 While this checker was written (2026-10-11), only the README and `vectors.json` of
 `examples/acceptance-record-cold` were opened in that repository: not the reference checker
@@ -63,6 +69,12 @@ here, where the vector expects `key_unresolved` with `policy_refusal: null` (sen
 relying party, and the README's table at `0abf726` records it for this checker). At `951d4fe`, before the
 sentence-5 change below, it was 44/46: `acc-outcome-at-no-fraction` was `input_error` too.
 
+`python3 misura_vettori.py fonti/9d4cf2c_vectors.json` (50 vectors, the three of sentence 9 among them): 49/50 (result
+49/50, conditions 50/50, disposition 8/8, key_step 14/15, policy_refusal 2/3) on Python 3.9.25, 3.11.2 and 3.13.15;
+the one disagreement is `acc-complete-not-boolean` (sentence 8, as above). At `6a137d0`, before sentence 9, it was
+47/50: `acc-mixed-order-key-accepted-by-both-equations` was `verified` and `acc-mixed-order-key-equations-disagree`
+was malformed `signature_invalid`.
+
 The 27 vectors do not exercise the four sentences of 2026-10-12: this version and `fd88fbb` both give 27/27.
 `test_piccolo_ordine.py` and the rows of `test_generativi.py` marked "sentence" do: both files fail on `fd88fbb`
 (11 of the 14 "sentence" rows; the version rows `null`, `0` and a list were already malformed there).
@@ -70,9 +82,11 @@ The 27 vectors do not exercise the four sentences of 2026-10-12: this version an
 ## Run
 
 ```
-python3 fetch_sources.py           # downloads four vector files, four READMEs, RFC 7515, RFC 8032 and the draft into fonti/, checks sha256
+python3 fetch_sources.py           # downloads five vector files, five READMEs, speccheck's cases.txt, RFC 7515, RFC 8032 and the draft into fonti/, checks sha256
 python3 misura_vettori.py fonti/d750291_vectors.json
 python3 misura_vettori.py fonti/536681b_vectors.json   # 45/46: acc-complete-not-boolean is input_error here (sentence 8)
+python3 misura_vettori.py fonti/9d4cf2c_vectors.json   # 49/50: the same one disagreement
+python3 speccheck.py                 # the 12 cases of ed25519-speccheck through ed25519_rfc8032.verify, with the reason
 python3 acceptance_check.py CASE.json    # one case; exit 0 verified, 2 unknown/key_unresolved/no_record,
                                          # 1 malformed, 3 input outside the grammar,
                                          # 74 receipt not written whole to stdout (any verdict; a non-blocking
@@ -85,6 +99,7 @@ python3 test_ricevuta.py             # the receipt is written whole, or exit 74 
 python3 controlli.py                 # positive controls: altered vectors, source mutants
 python3 mutanti_v2.py                # mutants of the lines changed on 2026-10-12, against the whole suite
 python3 mutanti_ricevuta.py          # mutants of the lines that write the receipt, against test_ricevuta.py
+python3 mutanti_v3.py                # mutants of the lines changed on 2026-10-13 (sentence 9), against the whole suite
 ```
 
 ## Inputs the README now settles (2026-10-12)
@@ -119,6 +134,51 @@ The README at `0abf726` added sentences 5-8 the same day. Measured here on 2026-
 8. not followed: `trust_material_complete` other than the JSON value `true`, and a `kid` listed twice in the trust
    material, are `input_error` here, as before. Sentence 8 names this as the relying party's choice and the
    README's table at `0abf726` records it for this checker.
+
+The README at `9d4cf2c` added sentence 9 on 2026-10-13; quoted from it:
+
+> 9. A key in the trust material that is a mixed-order point (neither small-order nor in the prime-order subgroup: `[L]A` is not the identity, `L` the group order) is not a key of the confirming party: the result is `key_unresolved`, as in sentence 4. A signature whose `R` is a mixed-order point is `signature_invalid`. Whether a signature under such a key, or with such an `R`, verifies depends on whether the verifier uses the cofactorless (`[S]B = R + [k]A`) or the cofactored (`[8][S]B = [8]R + [8][k]A`) equation of RFC 8032 §5.1.7, so two conforming RFC 8032 verifiers can disagree on the same acceptance. Checking `[L]P` for the key and for `R` before verification removes that dependence. Vectors: `acc-mixed-order-key-accepted-by-both-equations` (a signature every RFC 8032 verifier accepts), `acc-mixed-order-key-equations-disagree`, `acc-mixed-order-r-real-key`. Reported by TKCollective's measurement table on x402-foundation/tsc#4 (2026-10-13, case 3: mixed-order `A` and `R` accepted by their guard and by the library).
+
+This checker follows it since the commit after `6a137d0`: `ed25519_rfc8032.key_problem` returns `mixed-order point`
+for a key that is not of small order and whose `[L]A` is not the neutral point (`L` the order of the base point, the
+prime order of its subgroup), and the checker treats it as a small-order key (sentence 4): `key_unresolved`, with
+`policy_refusal` equal to the completeness declaration, found at the key step, and listed in `notes` as
+`trust_material_key_unusable:<kid>: mixed-order point`. `ed25519_rfc8032.verify` returns False when `A` or `R` is of
+mixed order, before the equation. With the `A` check in place the `R` check cannot change what `verify` returns: if `A`
+is in the subgroup of order `L` and the cofactorless equation holds, `R = [S]B - [k]A` is in that subgroup too; it is
+kept because sentence 9 names `R`, and `mutanti_v3.py` lists that mutant as surviving.
+
+## Ed25519 on the 12 cases of "Taming the many EdDSAs"
+
+`python3 speccheck.py` runs the 12 cases of `cases.txt` (pinned above) through `ed25519_rfc8032.verify`, each on its
+own message (the bytes of its hex, not a JWS signing input), as TKCollective ran them for tanilo-receipt-verify 0.2.1
+([x402-foundation/tsc#4, 2026-10-13](https://github.com/x402-foundation/tsc/issues/4#issuecomment-6146209141)). The
+reason is the first of `verify`'s own checks that refuses the case, computed by `speccheck.py` from the point
+arithmetic, not read back from `verify`; the two columns of the equations of RFC 8032 Section 5.1.7 step 3 are
+computed the same way. Positive control first: RFC 8032 Section 7.1 TEST 1 verifies and a copy with one bit of `S`
+flipped does not. The last two columns are copied from TKCollective's comment (their measurement, cryptography 50.0.2
+and OpenSSL 4.0.3; as they state, the 0.2.1 column is their guard followed, when it passed, by the library, not the
+package's public `verify()`); we ran `cryptography` 50.0.1 with OpenSSL 4.0.2 on the same 12 cases and got the
+same 12 results as their last column.
+
+| Case | `A` | `R` | cofactorless / cofactored | `6a137d0` | now | reason now | tanilo-receipt-verify 0.2.1 | `cryptography` alone |
+|---|---|---|---|---|---|---|---|---|
+| 0 | small order | small order | holds / holds | rejects | rejects | small-order `A`, `R` (sentence 4) | rejected, `small_order_key` | accepts |
+| 1 | small order | mixed order | holds / holds | rejects | rejects | small-order `A` (sentence 4) | rejected, `small_order_key` | accepts |
+| 2 | mixed order | small order | holds / holds | rejects | rejects | small-order `R` (sentence 4) | rejected, `small_order_r` | accepts |
+| 3 | mixed order | mixed order | holds / holds | **accepts** | rejects | mixed-order `A`, `R` (sentence 9) | **accepted** | accepts |
+| 4 | mixed order | mixed order | fails / holds | rejects | rejects | mixed-order `A`, `R` (sentence 9); at `6a137d0` the cofactorless equation | rejected by the library | rejects |
+| 5 | mixed order | prime order | fails / holds | rejects | rejects | mixed-order `A` (sentence 9); at `6a137d0` the cofactorless equation | rejected by the library | rejects |
+| 6, 7 | prime order | prime order | holds / holds | rejects | rejects | `S` >= `L` (RFC 8032 5.1.7 step 1) | rejected, `signature_s_out_of_range` | rejects |
+| 8, 9 | mixed order | `x` = 0 with the sign bit set | - | rejects | rejects | `R` does not decode (RFC 8032 5.1.3) | rejected, `small_order_r` | rejects |
+| 10 | `x` = 0 with the sign bit set | mixed order | - | rejects | rejects | `A` does not decode (RFC 8032 5.1.3) | rejected, `small_order_key` | rejects |
+| 11 | `x` = 0 with the sign bit set | mixed order | - | rejects | rejects | `A` does not decode (RFC 8032 5.1.3) | rejected, `small_order_key` | accepts |
+
+Case 3 is the only case on which `6a137d0` and now differ: at `6a137d0` this verifier accepted it, as
+tanilo-receipt-verify 0.2.1 does; now it is refused. On the other eleven the verdict is the same at `6a137d0`, now, and
+in TKCollective's 0.2.1 column; the reasons differ on 8 to 11 (here the encoding is refused before any order is
+computed) and on 4 and 5 (the library's equation there and at `6a137d0`, the order check now). `test_ed25519.py` asks
+that none of the 12 verifies: it fails at `6a137d0` on case 3.
 
 ## Readings of ours
 
@@ -185,10 +245,41 @@ JSON numbers are never converted, so the verdict does not depend on `PYTHONINTMA
 
 ES256 and the compact serialization; verification of the accepted record itself; RFC 8785 numbers (the record
 holds strings only). Ed25519 here is not constant time and uses the cofactorless equation that RFC 8032 Section
-5.1.7 allows. Keys and `R` of small order are refused (README sentence 4; RFC 8032 does not require it); keys of
-mixed order (a large-order point plus a small-order one) are not refused, as neither text asks for it.
+5.1.7 allows. Keys and `R` of small order (README sentence 4) and of mixed order (sentence 9) are refused; RFC 8032
+requires neither. With both refused, `A` and `R` lie in the subgroup of order `L`, where the cofactorless and the
+cofactored equation give the same result.
 
 ## Changes
+
+**2026-10-13 (after `6a137d0`): sentence 9, mixed-order keys and `R`; what a cut bytecode cache does to an import.** (1) A trust-material
+key of mixed order is now `key_unresolved` (sentence 9, as sentence 4; it was used as a key), and `verify` refuses a
+mixed-order `A` or `R` (see "Inputs the README now settles"). The 50 vectors at `9d4cf2c`: 47/50 at `6a137d0`, 49/50
+now, on Python 3.9, 3.11 and 3.13; the receipts written to a file for the 50 cases have the same bytes, stderr and
+exit codes at `6a137d0` and now for 48 of them, on the three versions; the two that differ are
+`acc-mixed-order-key-accepted-by-both-equations` (`verified`, exit 0, at `6a137d0`) and
+`acc-mixed-order-key-equations-disagree` (malformed `signature_invalid`, exit 1), both now `key_unresolved`, exit 2.
+`test_piccolo_ordine.py` (section 7 and the mixed-order rows of sections 1 and 2b) fails 29 of its 254 checks at `6a137d0`,
+`test_ed25519.py` fails there on case 3 of ed25519-speccheck, `test_nemesis.py` on one check (a mixed-order key whose
+signature satisfies the cofactorless equation: `verify` returned True), on the three versions; all pass now.
+`mutanti_v3.py` kills 10/10 mutants of the new lines; one more, which drops the `R` check from `verify`, survives and
+is equivalent (above). Two mutants of `mutanti_v2.py` became equivalent with this change and are listed as such there:
+refusing as `R` only the neutral point, or only points whose order divides 4, among the small-order points; any other
+small-order point `P` has `[L]P` different from the neutral point and is refused by the mixed-order check. The other
+23 are killed. In `test_nemesis.py` the check that `k` is reduced mod `L` used a mixed-order key and now expects
+False; with `A` of prime order, `[k]A = [k mod L]A`, so that reduction no longer shows in what `verify` returns.
+(2) The bytecode cache, unchanged in the code: run as a command, the checker still sets `sys.dont_write_bytecode` and
+points `sys.pycache_prefix` at `os.devnull`, so a `.pyc` of `ed25519_rfc8032` cut by CPython 3.9 or 3.11 (they write
+it with one raw write; CPython fixed the writing side upstream in
+[GH-126606](https://github.com/python/cpython/issues/126606), "don't write incomplete pyc files", backported to 3.12
+as `df59b64589` and to 3.13 as `ad1b23bf29`) is not read when the checker runs as a command. Declared limit, measured
+on Python 3.9, 3.11 and 3.13 with a `.pyc` cut to 1 024 bytes: a program that imports the checker reads that file
+and exits 1 with `EOFError: marshal data too short`, with `-B` too (`-B` stops writing the cache, not reading it);
+deleting `__pycache__`, or a `PYTHONPYCACHEPREFIX` that points elsewhere, is the remedy. `import acceptance_check`
+under `ulimit -f 1` leaves two cut files of 1 024 bytes, the `.pyc` of `acceptance_check` and that of
+`ed25519_rfc8032`, on Python 3.9 and 3.11 and none on 3.13 (measured). `test_ricevuta.py`
+now also checks the import case, `-B`, and the two remedies; `mutanti_ricevuta.py` kills 38/38 on Python 3.11.
+(3) `speccheck.py` and the table above are new; `fetch_sources.py` also pins the README and the vectors at `9d4cf2c`
+and speccheck's `cases.txt`.
 
 **2026-10-13 (after `acfad3d`): the byte order mark, the bytecode cache.** No verdict changes. (1) The receipt's bytes
 are now those Python's own text layer writes there as the first thing written (encoding, error handler, and a byte

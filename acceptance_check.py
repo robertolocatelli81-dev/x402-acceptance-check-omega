@@ -8,7 +8,8 @@ Written from the README of babyblueviper1/preaction-governance-conformance at 5a
 Aligned on 2026-10-12 with the README at 90b5032 (section "Inputs the vectors do not yet pin", sentences 1-4,
 and "Changes between versions") and with RFC 7515 Sections 4.1.11, 7.2.1 and 7.2.2; later the same day with the
 README at 0abf726 (sentences 5-7; sentence 8 is left to the relying party and this checker keeps input_error there)
-and the 46 vectors at 536681b. The code of the other
+and the 46 vectors at 536681b; on 2026-10-13 with the README at 9d4cf2c (sentence 9, mixed-order keys and R) and the
+50 vectors at 9d4cf2c. The code of the other
 acceptance-record checkers (the reference one and actaseal's) was not opened, then or before; see the README
 for what else of that repository we had read.
 
@@ -260,8 +261,9 @@ def _validate_inputs(case, notes):
             for k in sorted(set(jwk) - JWK_UNDERSTOOD):
                 notes.append("jwk_member_ignored:%s:%s (RFC 7517 section 4)" % (kid, k))
             problem = ed.key_problem(x)
-            if problem == "small-order point":
-                # README sentence 4: a small-order key is not a key of the confirming party (key_unresolved).
+            if problem in ("small-order point", "mixed-order point"):
+                # README sentences 4 and 9: a small-order or mixed-order key is not a key of the confirming
+                # party (key_unresolved).
                 notes.append("trust_material_key_unusable:%s: %s" % (kid, problem))
                 keys[kid] = None
             else:
@@ -365,7 +367,7 @@ def check(case, *, sig_invalid_as_token=False, sha256_any_string=False, disposit
     if reasons:
         return _report("malformed", ["acceptance_member_invalid"], notes=notes, reasons=reasons)
 
-    # -- key step, -03 5.4.2; README sentence 4: a small-order key resolves to nothing
+    # -- key step, -03 5.4.2; README sentences 4 and 9: a small-order or mixed-order key resolves to nothing
     kid = hdr["kid"]
     if keys.get(kid) is None:
         return _report("key_unresolved", key_step="key_unresolved", policy_refusal=bool(complete), notes=notes)

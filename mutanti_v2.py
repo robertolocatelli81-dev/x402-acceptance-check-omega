@@ -5,7 +5,8 @@ whole suite: each mutant is applied to a copy of this directory, and is killed i
 test_piccolo_ordine.py, test_generativi.py, test_nemesis.py, test_ed25519.py exits non-zero (or the 27
 pinned vectors disagree). The unmutated copy must pass every one of them first (the bench must be able to pass).
 
-python3 mutanti_v2.py   -> exit 0 iff the unmutated copy passes and every mutant is killed
+python3 mutanti_v2.py   -> exit 0 iff the unmutated copy passes, every mutant is killed, and the two listed in
+                           EQUIVALENT (equivalent since README sentence 9, 2026-10-13) survive
 """
 import os
 import shutil
@@ -21,10 +22,6 @@ MUTANTS = [
     ("ed: A small order allowed", ED, "if _small_order(A) or _small_order(R):", "if _small_order(R):"),
     ("ed: R small order allowed", ED, "if _small_order(A) or _small_order(R):", "if _small_order(A):"),
     ("ed: no small-order check", ED, "if _small_order(A) or _small_order(R):", "if False:"),
-    ("ed: R refused only if neutral", ED, "if _small_order(A) or _small_order(R):",
-     "if _small_order(A) or _encode_point(R) == _encode_point(_NEUTRAL):"),
-    ("ed: R refused only if its order divides 4", ED, "if _small_order(A) or _small_order(R):",
-     "if _small_order(A) or _encode_point(_scalar_mul(4, R)) == _encode_point(_NEUTRAL):"),
     ("ed: order divides 4 only", ED, "_scalar_mul(8, P)", "_scalar_mul(4, P)"),
     ("ed: order divides 2 only", ED, "_scalar_mul(8, P)", "_scalar_mul(2, P)"),
     ("ed: neutral point only", ED, "return _encode_point(_scalar_mul(8, P)) == _encode_point(_NEUTRAL)",
@@ -35,7 +32,8 @@ MUTANTS = [
     ("ac: unusable key kept", AC, "keys[kid] = None", "keys[kid] = x"),
     ("ac: small-order key -> input_error", AC, 'notes.append("trust_material_key_unusable:%s: %s" % (kid, problem))',
      'raise InputError("unusable key")'),
-    ("ac: undecodable key -> key_unresolved", AC, 'if problem == "small-order point":', "if problem is not None:"),
+    ("ac: undecodable key -> key_unresolved", AC, 'if problem in ("small-order point", "mixed-order point"):',
+     "if problem is not None:"),
     ("ac: undecodable key -> input_error", AC, 'notes.append("trust_material_key_undecodable:%s: %s" % (kid, problem))',
      'raise InputError("undecodable key")'),
     ("ac: key step by membership", AC, "if keys.get(kid) is None:", "if kid not in keys:"),
@@ -51,6 +49,17 @@ MUTANTS = [
      'return _report("malformed", ["acceptance_envelope_invalid"], notes=notes, reasons=reasons)'),
     ("ac: alg from the protected header only", AC, 'if jose.get("alg") != "EdDSA":', 'if hdr.get("alg") != "EdDSA":'),
     ("ac: header not disjoint", AC, "            if both:\n", "            if False:\n"),
+]
+# Since sentence 9 (2026-10-13) these two survive by construction: a small-order point other than the neutral one
+# has [L]P != neutral (L is odd, so [L]P = [L mod ord(P)]P with L mod ord(P) != 0), so verify's mixed-order check
+# refuses it as R whether or not the small-order check does; the small-order check on R is needed for R = neutral
+# only, which both mutants still refuse. Run and expected to survive.
+EQUIVALENT = [
+    ("ed: R refused only if neutral (equivalent since sentence 9)", ED, "if _small_order(A) or _small_order(R):",
+     "if _small_order(A) or _encode_point(R) == _encode_point(_NEUTRAL):"),
+    ("ed: R refused only if its order divides 4 (equivalent since sentence 9)", ED,
+     "if _small_order(A) or _small_order(R):",
+     "if _small_order(A) or _encode_point(_scalar_mul(4, R)) == _encode_point(_NEUTRAL):"),
 ]
 
 
@@ -84,22 +93,26 @@ def main():
         if f:
             return 1
         survivors = []
-        for name, fn, old, new in MUTANTS:
-            d = os.path.join(td, "m%d" % len(survivors) + name.replace(" ", "_").replace(":", "").replace(">", ""))
+        bad = []
+        for i, (name, fn, old, new) in enumerate(MUTANTS + EQUIVALENT):
+            d = os.path.join(td, "m%d" % i)
             os.mkdir(d)
             copy_tree(d)
             src = open(os.path.join(d, fn)).read()
             if src.count(old) != 1:
                 print("%-45s anchor found %d times" % (name, src.count(old)))
-                survivors.append(name)
+                bad.append(name)
                 continue
             open(os.path.join(d, fn), "w").write(src.replace(old, new))
             f = run_suite(d)
-            print("%-45s %s %s" % (name, "killed by" if f else "SURVIVED", f))
+            print("%-45s %s %s" % (name, "killed by" if f else "SURVIVED", f), flush=True)
             if not f:
                 survivors.append(name)
-        print("MUTANTS %d, SURVIVORS %s" % (len(MUTANTS), survivors))
-        return 1 if survivors else 0
+            if bool(f) == (i >= len(MUTANTS)):
+                bad.append(name)
+        print("MUTANTS %d (+%d equivalent), SURVIVORS %s, NOT AS EXPECTED %s" % (len(MUTANTS), len(EQUIVALENT),
+                                                                                survivors, bad))
+        return 1 if bad else 0
 
 
 if __name__ == "__main__":

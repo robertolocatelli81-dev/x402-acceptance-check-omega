@@ -14,11 +14,16 @@ sentences 1-4 of "Inputs the vectors do not yet pin", and with RFC 7515 7.2.1/7.
    ignored and listed in notes where a text says to ignore (README sentence 1, RFC 7515, RFC 7517).
 6. The order sentence of the README: undecodable protected header before the key step, a payload that is
    not a JSON object after it.
+7. Sentence 9 of the README at 9d4cf2c (2026-10-13): a mixed-order key (aB + T, T one of the 7 small-order
+   points other than the neutral one) is not a key of the confirming party (key_unresolved, policy_refusal as in
+   sentence 4), a mixed-order R is signature_invalid; verify refuses both, also where both equations of RFC 8032
+   5.1.7 step 3 hold; the 3 mixed-order vectors at 9d4cf2c.
 
 Expected values are written from those texts, not read back from the checker.
 python3 test_piccolo_ordine.py   -> exit 0 iff every check holds
 """
 import hashlib
+import os
 import random
 import sys
 
@@ -79,7 +84,7 @@ honest = [ed.public_key(hashlib.sha256(b"h%d" % i).digest()) for i in range(20)]
 check("20 honest keys: key_problem None", all(key_problem(k) is None for k in honest))
 a_mix, _ = ed._expand(hashlib.sha256(b"mix").digest())
 mixed = pt(ed._add(ed._scalar_mul(a_mix, ed._B), T8p))
-check("mixed-order key (aB + T8): not small order, usable (sentence 4 names small order only)", key_problem(mixed) is None)
+check("mixed-order key (aB + T8): mixed-order point (sentence 9, 9d4cf2c)", key_problem(mixed) == "mixed-order point")
 
 # ---------------------------------------------------------------- 2. verify refuses small-order A and R
 msgs = [b"", b"m"] + [hashlib.sha256(b"msg%d" % i).digest() for i in range(14)]
@@ -104,6 +109,9 @@ for A in SMALL + NONCANON:
 # Under a key of prime order only R = neutral can satisfy the cofactorless equation, so for the other 7 points the
 # R refusal shows only under a mixed-order key A' = aB + T: with R = -[k]T and S = k*a mod L the equation
 # [S]B = R + [k]A' holds (the holder of a signs; nobody is forged), and sentence 4 makes the signature invalid.
+# Since sentence 9 (9d4cf2c) such a key is itself refused: verify is False and the checker says key_unresolved.
+KEYUNR = {"result": "key_unresolved", "conditions": [], "key_step": "key_unresolved", "disposition": None,
+          "policy_refusal": False}
 a_mr, _ = ed._expand(hashlib.sha256(b"mix-R").digest())
 AB_mr = ed._scalar_mul(a_mr, ed._B)
 R_seen = set()
@@ -130,9 +138,9 @@ for T in SMALL:
             c = tg.base_case(acceptance=env)
             c["trust_material"]["keys"][1]["x"] = tg.b64u(Akey)
             r = ac.check(c)
-            check("mixed key (aB + T %s...), R %s...: equation holds, verify False, signature_invalid"
+            check("mixed key (aB + T %s...), R %s...: equation holds, verify False, key_unresolved (sentence 9)"
                   % (T.hex()[:8], R.hex()[:8]), eq and ed.verify(Akey, si, sig) is False
-                  and not tg.subset_agrees(tg.SIGINV, r), True)
+                  and not tg.subset_agrees(KEYUNR, r), True)
             R_seen.add(R)
             n_r += 1
             hits += 1
@@ -276,6 +284,111 @@ check("protected header not a JSON object + invalid signature: member_invalid, n
       not tg.subset_agrees({"result": "malformed", "conditions": ["acceptance_member_invalid"], "key_step": None}, ac.check(c)))
 c = tg.base_case(acceptance=tg.envelope(header={"alg": "EdDSA", "kid": "nope"}, raw_payload=b"x"))
 check("unknown kid + payload not JSON: key_unresolved (key step first)", ac.check(c)["result"] == "key_unresolved")
+
+# ---------------------------------------------------------------- 7. sentence 9 (9d4cf2c): mixed-order points
+def equations(A, msg, sig):
+    """(cofactorless, cofactored) of RFC 8032 5.1.7 step 3, computed here."""
+    Ap, Rp = ed._decode_point(A), ed._decode_point(sig[:32])
+    S = int.from_bytes(sig[32:], "little")
+    k = int.from_bytes(hashlib.sha512(sig[:32] + A + msg).digest(), "little") % L
+    lhs, rhs = ed._scalar_mul(S, ed._B), ed._add(Rp, ed._scalar_mul(k, Ap))
+    return pt(lhs) == pt(rhs), pt(ed._scalar_mul(8, lhs)) == pt(ed._scalar_mul(8, rhs))
+
+
+def order_of(T):
+    return next(n for n in (1, 2, 4, 8) if pt(ed._scalar_mul(n, ed._decode_point(T))) == NEUTRAL)
+
+
+TORS = [T for T in SMALL if T != NEUTRAL]
+n_mixed = 0
+for i in range(6):
+    ai, _ = ed._expand(hashlib.sha256(b"mixed%d" % i).digest())
+    for T in TORS:
+        P = pt(ed._add(ed._scalar_mul(ai, ed._B), ed._decode_point(T)))
+        n_mixed += key_problem(P) == "mixed-order point"
+check("6 scalars x 7 torsion points: aB + T is a mixed-order point, %d/42" % n_mixed, n_mixed == 42)
+check("aB alone (6 scalars): key_problem None", all(key_problem(ed.public_key(hashlib.sha256(b"mixed%d" % i).digest()))
+                                                     is None for i in range(6)))
+a9, _ = ed._expand(tg.SK_CP)
+AB9 = ed._scalar_mul(a9, ed._B)
+both = disagree = mixr = mixar = 0
+cases_both, cases_dis = [], []
+for T in TORS:
+    Tp = ed._decode_point(T)
+    Amix = pt(ed._add(AB9, Tp))
+    o = order_of(T)
+    found_both = found_dis = False
+    for i in range(400):
+        env = tg.envelope(dict(tg.PAYLOAD, accepted_at="2026-10-06T09:00:00.%03dZ" % i))
+        si = (env["protected"] + "." + env["payload"]).encode()
+        r_ = int.from_bytes(hashlib.sha512(b"r9" + si + T).digest(), "little") % L
+        R = pt(ed._scalar_mul(r_, ed._B))
+        k = int.from_bytes(hashlib.sha512(R + Amix + si).digest(), "little") % L
+        sig = R + ((r_ + k * a9) % L).to_bytes(32, "little")
+        eqs = equations(Amix, si, sig)
+        if k % o == 0 and not found_both:          # [k]T = neutral: both equations hold
+            found_both = True
+            both += eqs == (True, True) and ed.verify(Amix, si, sig) is False
+            env["signature"] = tg.b64u(sig)
+            cases_both.append((Amix, env))
+        elif k % o != 0 and not found_dis:         # cofactored holds, cofactorless does not
+            found_dis = True
+            disagree += eqs == (False, True) and ed.verify(Amix, si, sig) is False
+            env["signature"] = tg.b64u(sig)
+            cases_dis.append((Amix, env))
+        if found_both and found_dis:
+            break
+    # mixed R under the real key: R = [r]B + T, S = r + k*a (cofactored holds, cofactorless does not)
+    env = tg.envelope(dict(tg.PAYLOAD, accepted_at="2026-10-07T09:00:00.000Z"))
+    si = (env["protected"] + "." + env["payload"]).encode()
+    r_ = int.from_bytes(hashlib.sha512(b"r9R" + T).digest(), "little") % L
+    R = pt(ed._add(ed._scalar_mul(r_, ed._B), Tp))
+    k = int.from_bytes(hashlib.sha512(R + tg.PK["cp-A"] + si).digest(), "little") % L
+    sig = R + ((r_ + k * a9) % L).to_bytes(32, "little")
+    env["signature"] = tg.b64u(sig)
+    mixr += (equations(tg.PK["cp-A"], si, sig) == (False, True) and ed.verify(tg.PK["cp-A"], si, sig) is False
+             and not tg.subset_agrees(tg.SIGINV, ac.check(tg.base_case(acceptance=env))))
+    # mixed A and mixed R with the cofactorless equation holding: R = [r]B - [k]T needs k first, so R = [r]B + U
+    # is searched over U among the torsion points
+    for i in range(200):
+        env = tg.envelope(dict(tg.PAYLOAD, accepted_at="2026-10-08T09:00:00.%03dZ" % i))
+        si = (env["protected"] + "." + env["payload"]).encode()
+        r_ = int.from_bytes(hashlib.sha512(b"r9AR" + si + T).digest(), "little") % L
+        hit = None
+        for U in TORS:
+            R = pt(ed._add(ed._scalar_mul(r_, ed._B), ed._decode_point(U)))
+            k = int.from_bytes(hashlib.sha512(R + Amix + si).digest(), "little") % L
+            if pt(ed._add(ed._decode_point(U), ed._scalar_mul(k, Tp))) == NEUTRAL:
+                hit = R + ((r_ + k * a9) % L).to_bytes(32, "little")
+                break
+        if hit:
+            mixar += equations(Amix, si, hit) == (True, True) and ed.verify(Amix, si, hit) is False
+            break
+check("mixed key, both equations hold (k divisible by the torsion order): verify False on %d/7" % both, both == 7)
+check("mixed key, the equations disagree: verify False on %d/7" % disagree, disagree == 7)
+check("real key, mixed R (cofactored holds): verify False and signature_invalid on %d/7" % mixr, mixr == 7)
+check("mixed key and mixed R, both equations hold: verify False on %d/7" % mixar, mixar == 7)
+rows = total = 0
+for Amix, env in cases_both + cases_dis:
+    for complete in (False, True):
+        c = tg.base_case(acceptance=env, trust_material_complete=complete)
+        c["trust_material"]["keys"][1]["x"] = tg.b64u(Amix)
+        r = ac.check(c)
+        total += 1
+        rows += (not tg.subset_agrees(dict(KEYUNR, policy_refusal=complete), r)
+                 and "trust_material_key_unusable:cp-A: mixed-order point" in r["notes"])
+check("checker, mixed-order key (both equations / disagreeing), complete False/True: key_unresolved, "
+      "policy_refusal = complete, noted, %d/%d" % (rows, total), rows == total == 28)
+c = tg.base_case()
+c["trust_material"]["keys"].append(tg.jwk("junk", mixed))
+r = ac.check(c)
+check("unused mixed-order key elsewhere in the trust material: verified, noted",
+      r["result"] == "verified" and "trust_material_key_unusable:junk: mixed-order point" in r["notes"])
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonti", "9d4cf2c_vectors.json"), "rb") as f:
+    V9 = {v["id"]: v for v in ac.strict_json(f.read().decode("utf-8"))["vectors"]}
+for vid in ("acc-mixed-order-key-accepted-by-both-equations", "acc-mixed-order-key-equations-disagree",
+            "acc-mixed-order-r-real-key"):
+    check("vector %s at 9d4cf2c" % vid, not tg.subset_agrees(V9[vid]["expect"], ac.check(V9[vid]["case"])))
 
 print("CHECKS %d, FAILS %d %s" % (COUNT[0], len(FAILS), FAILS[:20]))
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Roberto Locatelli
 """Download the third-party inputs into fonti/ and check each against a pinned sha256.
 They are not redistributed in this repository: the vectors and README belong to
-babyblueviper1/preaction-governance-conformance (vectors CC0-1.0, repository MIT), the RFCs and the draft to
-the IETF Trust and their authors. Exit 0 iff every file matches its pin."""
+babyblueviper1/preaction-governance-conformance (vectors CC0-1.0, repository MIT), cases.txt to
+novifinancial/ed25519-speccheck (Apache-2.0), the RFCs and the draft to the IETF Trust and their authors. Exit 0 iff every file matches its pin."""
 import hashlib
 import os
 import sys
@@ -28,6 +28,13 @@ PINS = [
      "464ee7933a17c3ab52db32b93ac21f555a026781f4a8a132b91977eb4fb02882"),
     ("0abf726_README.md", BBR % "0abf7265ccad32cd21a63cb72c2ce8c142845197",
      "98a47768fede7bb5e4d8278e777f3e1732d3b40b36a5b99f2801635688b70b0b"),
+    ("9d4cf2c_vectors.json", BBV % "9d4cf2c7782fe79b68c7679b4967180ebdb9e0bd",
+     "c5d0a142cf22b1cfff366fb1b6689de0b0d88ba0ad5cf846db9027204f0c138a"),
+    ("9d4cf2c_README.md", BBR % "9d4cf2c7782fe79b68c7679b4967180ebdb9e0bd",
+     "d287af2ced801cad075059e3e517357de8ec637b415cda9da240802acf152f4f"),
+    ("speccheck_cases.txt",
+     "https://raw.githubusercontent.com/novifinancial/ed25519-speccheck/65519336fda78a3d016e947df6d82848aca0c9da/cases.txt",
+     "db14ccd6953ffa79c81586da8f4ab41dd893f7efd07af97d027a27c179b3ab6b"),
     ("rfc7515.txt", "https://www.rfc-editor.org/rfc/rfc7515.txt",
      "ecbf84674118e62526511c1237e1deaa86aada86d25b247623a2a7e04ae62e40"),
     ("rfc8032.txt", "https://www.rfc-editor.org/rfc/rfc8032.txt",

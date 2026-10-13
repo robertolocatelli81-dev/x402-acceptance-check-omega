@@ -210,7 +210,15 @@ for i in range(200):
     if (k_full % ed.L) % 8 == 0 and k_full % 8 != 0:
         found = (m, Rs + ((r + (k_full % ed.L) * a) % ed.L).to_bytes(32, "little"))
         break
-check("mixed-order key, k mod L divisible by 8: verifies (k reduced mod L)", found is not None and ed.verify(Am, found[0], found[1]))
+# since README sentence 9 (9d4cf2c) a mixed-order key is refused, so this signature, which the cofactorless equation
+# with k reduced mod L accepts, is now False; with a key of prime order [k]A = [k mod L]A, so the reduction of k is
+# no longer observable through verify (an unreduced k gives the same verdict)
+eq = found is not None and ed._encode_point(ed._scalar_mul(int.from_bytes(found[1][32:], "little"), ed._B)) == \
+    ed._encode_point(ed._add(ed._decode_point(found[1][:32]),
+                             ed._scalar_mul(int.from_bytes(hashlib.sha512(found[1][:32] + Am + found[0]).digest(),
+                                                           "little") % ed.L, ed._decode_point(Am))))
+check("mixed-order key, k mod L divisible by 8: the equation holds, verify False (sentence 9)",
+      eq and ed.verify(Am, found[0], found[1]) is False)
 
 print("FAILS", len(FAILS), FAILS)
 sys.exit(1 if FAILS else 0)

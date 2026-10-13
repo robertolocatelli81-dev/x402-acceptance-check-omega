@@ -20,7 +20,9 @@ an input_error case and a verified case whose receipt is larger than 64 KiB, wit
     UTF-8-SIG: the same bytes as that wrapper writes for the same text,
   - from a copy without a bytecode cache, once under `ulimit -f 1` and once without: the second run gives the
     verdict and no __pycache__ is written; with a .pyc cut to 1 024 bytes already there, the run gives the verdict
-    and leaves that file as it was; imported as a library, the checker changes neither bytecode flag,
+    and leaves that file as it was; a program that imports the checker reads that file and dies (EOFError), with -B
+    too, and does not once __pycache__ is deleted or PYTHONPYCACHEPREFIX points elsewhere (declared in the README);
+    imported as a library, the checker changes neither bytecode flag,
   - with PYTHONIOENCODING cp864:replace and cp864 on a reason that names "%unk" (cp864 has no "%"): the text
     layer's bytes, and 74 with no receipt,
 and, in each mode where the receipt is lost, the exit code must be 74 with one line "receipt not written: ..."
@@ -32,6 +34,7 @@ import copy
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -393,7 +396,9 @@ def main():
     check("bytecode: no __pycache__ written", not os.path.exists(os.path.join(pyc, "__pycache__")),
           repr(os.listdir(pyc)))
 
-    # NEMESIS 13/10/2026: a .pyc cut by an earlier run (acfad3d under `ulimit -f 1`) is not read
+    # NEMESIS 13/10/2026: a .pyc cut by an earlier run (acfad3d under `ulimit -f 1`) is not read when the checker runs
+    # as a command; for a program that imports it (README: declared) the cut file is read, -B does not help, and
+    # deleting __pycache__ or a PYTHONPYCACHEPREFIX elsewhere does
     cut = tempfile.mkdtemp()
     for name in ("acceptance_check.py", "ed25519_rfc8032.py"):
         with open(os.path.join(HERE, name), "rb") as f_in, open(os.path.join(cut, name), "wb") as f_out:
@@ -415,6 +420,19 @@ def main():
           "rc=%r %r" % (p.returncode, p.stderr[-120:]))
     with open(cpath, "rb") as f:
         check("bytecode: the cut .pyc left as it was", f.read() == whole[:1024])
+    lib = [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import acceptance_check", cut]
+    for label, argv in (("as is", lib), ("with -B", lib[:1] + ["-B"] + lib[1:])):
+        p = subprocess.run(argv, env=env, capture_output=True, timeout=60)
+        check("bytecode: imported as a library, %s: the cut .pyc is read, EOFError (declared)" % label,
+              p.returncode == 1 and b"EOFError" in p.stderr, "rc=%r %r" % (p.returncode, p.stderr[-120:]))
+    p = subprocess.run(lib, env=dict(env, PYTHONPYCACHEPREFIX=os.path.join(cut, "elsewhere")), capture_output=True,
+                       timeout=60)
+    check("bytecode: library, remedy PYTHONPYCACHEPREFIX elsewhere", p.returncode == 0 and p.stderr == b"",
+          "rc=%r %r" % (p.returncode, p.stderr[-120:]))
+    shutil.rmtree(os.path.join(cut, "__pycache__"))
+    p = subprocess.run(lib[:1] + ["-B"] + lib[1:], env=env, capture_output=True, timeout=60)
+    check("bytecode: library, remedy __pycache__ deleted", p.returncode == 0 and p.stderr == b"",
+          "rc=%r %r" % (p.returncode, p.stderr[-120:]))
 
     # NEMESIS 13/10/2026: imported as a library, the checker changes neither flag
     p = subprocess.run([sys.executable, "-c", "import sys, acceptance_check; "

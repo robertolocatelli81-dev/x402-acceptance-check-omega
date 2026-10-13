@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # Copyright (c) 2026 Roberto Locatelli
-"""Ed25519 against RFC 8032 section 7.1 test vectors (parsed from fonti/rfc8032.txt) and, if installed,
-the optional `cryptography` package on generated and altered signatures. Exit 0 iff all pass."""
+"""Ed25519 against RFC 8032 section 7.1 test vectors (parsed from fonti/rfc8032.txt), the 12 cases of
+ed25519-speccheck (fonti/speccheck_cases.txt) and, if installed, the optional `cryptography` package on generated
+and altered signatures. Exit 0 iff all pass."""
 import os, re, sys, hashlib, random
 import ed25519_rfc8032 as ed
 
@@ -39,6 +40,15 @@ s = int.from_bytes(d["SIGNATURE"][32:], "little") + ed.L
 mall = d["SIGNATURE"][:32] + s.to_bytes(32, "little")
 r = ed.verify(d["PUBLIC"], d["MESSAGE"], mall)
 print("S+L malleated signature rejected:", not r); fails += r
+# The 12 cases of "Taming the many EdDSAs" (novifinancial/ed25519-speccheck cases.txt at 6551933), each on its own
+# message: every one is refused here. 0-2 small-order A or R (README sentence 4), 3-5 mixed-order A or R (sentence 9;
+# case 3 satisfies both equations of RFC 8032 5.1.7 step 3), 6-7 S >= L (5.1.7 step 1), 8-11 a non-canonical
+# encoding (5.1.3). Expected values written from the paper's case list, not read back from verify().
+import speccheck
+cases = speccheck.read_cases("fonti/speccheck_cases.txt")
+acc = [i for i, c in enumerate(cases) if ed.verify(c["pbk"], c["msg"], c["sig"])]
+print("speccheck: %d cases, accepted %s (expected none)" % (len(cases), acc))
+fails += len(cases) != 12 or acc != []
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey, Ed25519PrivateKey
     from cryptography.exceptions import InvalidSignature
