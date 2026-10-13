@@ -36,8 +36,9 @@ import re
 import stat
 import sys
 
-if __name__ == "__main__":   # run as a command, never write the bytecode cache: CPython 3.9 and 3.11 write a .pyc with
-    sys.dont_write_bytecode = True   # one raw write; cut by a file size limit, every later run died (EOFError, 13/10/2026)
+if __name__ == "__main__":   # run as a command, write no bytecode cache: CPython 3.9 and 3.11 write a .pyc with one
+    sys.dont_write_bytecode = True   # raw write; cut by a file size limit, every later run died (EOFError, 13/10/2026)
+    sys.pycache_prefix = os.devnull  # and read none: a cut .pyc is not opened (nothing lies under /dev/null; Linux)
 import ed25519_rfc8032 as ed
 
 VERSION = "acceptance-record-v0"                      # README A1
@@ -526,8 +527,10 @@ def _write_receipt(text):
     pipe that is full) without raising, and the text layer drops the rest in silence. A non-blocking stdout is
     waited for, not given up on. The bytes are the ones the text layer would write as the first thing written (its
     encoding and error handler, its newline translation where the platform has one, a byte order mark only where that
-    layer writes one), so a receipt on a file or a pipe is byte for byte the same; in process, after text the caller
-    wrote to a utf-8-sig pipe, the receipt carries a second one."""
+    layer writes one), so a receipt on a file or a pipe is byte for byte the same. In process two cases differ: after
+    anything already written to a utf-8-sig pipe (the caller's text, an earlier receipt) the receipt carries a second
+    one, and on a file whose offset something else moved after the text layer was made (stderr sharing that file) it
+    carries none where that layer would write one."""
     out = sys.stdout
     if out is None:
         raise OSError("stdout is closed")

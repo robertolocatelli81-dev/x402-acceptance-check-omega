@@ -80,7 +80,14 @@ MUTANTS = [
      "        at_start = seekable\n"),
     ("BOM suppressed on every pipe (utf-8-sig too)", "(not seekable and codecs.lookup(encoding).name in (\"utf-16\", \"utf-32\"))",
      "(not seekable)"),
-    ("bytecode cache written when run as a command", "    sys.dont_write_bytecode = True", "    pass"),
+    ("bytecode cache written and read when run as a command (as at acfad3d)",
+     "    sys.dont_write_bytecode = True   # raw write; cut by a file size limit, every later run died (EOFError, 13/10/2026)\n"
+     "    sys.pycache_prefix = os.devnull", "    pass\n    pass"),
+    ("bytecode cache read when run as a command (a cut .pyc kills every run)",
+     "    sys.pycache_prefix = os.devnull", "    pass"),
+    ("bytecode flags set on a library import too", 'if __name__ == "__main__":   # run as a command', 'if True:   # run as a command'),
+    ("error handler ignored (strict always)", 'getincrementalencoder(encoding)(out.errors or "strict")',
+     'getincrementalencoder(encoding)("strict")'),
     ("bytecode guard on the wrong branch", 'if __name__ == "__main__":   # run as a command', 'if __name__ != "__main__":   # run as a command'),
 ]
 

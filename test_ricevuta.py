@@ -19,7 +19,10 @@ an input_error case and a verified case whose receipt is larger than 64 KiB, wit
   - in process, main() with sys.stdout a TextIOWrapper over a pipe whose encoding is spelled UTF-16, utf_32, U16 or
     UTF-8-SIG: the same bytes as that wrapper writes for the same text,
   - from a copy without a bytecode cache, once under `ulimit -f 1` and once without: the second run gives the
-    verdict and no __pycache__ is written,
+    verdict and no __pycache__ is written; with a .pyc cut to 1 024 bytes already there, the run gives the verdict
+    and leaves that file as it was; imported as a library, the checker changes neither bytecode flag,
+  - with PYTHONIOENCODING cp864:replace and cp864 on a reason that names "%unk" (cp864 has no "%"): the text
+    layer's bytes, and 74 with no receipt,
 and, in each mode where the receipt is lost, the exit code must be 74 with one line "receipt not written: ..."
 on stderr when stderr works, and no traceback. The usage error keeps exit 3 with stderr closed.
 
@@ -389,6 +392,57 @@ def main():
           "rc=%r %r" % (p.returncode, p.stderr[-120:]))
     check("bytecode: no __pycache__ written", not os.path.exists(os.path.join(pyc, "__pycache__")),
           repr(os.listdir(pyc)))
+
+    # NEMESIS 13/10/2026: a .pyc cut by an earlier run (acfad3d under `ulimit -f 1`) is not read
+    cut = tempfile.mkdtemp()
+    for name in ("acceptance_check.py", "ed25519_rfc8032.py"):
+        with open(os.path.join(HERE, name), "rb") as f_in, open(os.path.join(cut, name), "wb") as f_out:
+            f_out.write(f_in.read())
+    probe = subprocess.run([sys.executable, "-c", "import importlib.util as u, sys; sys.pycache_prefix = None; "
+                            "print(u.cache_from_source(sys.argv[1]))", os.path.join(cut, "ed25519_rfc8032.py")],
+                           env=env, capture_output=True, timeout=60)
+    cpath = probe.stdout.decode().strip()
+    good = subprocess.run([sys.executable, "-c", "import py_compile, sys; py_compile.compile(sys.argv[1], sys.argv[2])",
+                           os.path.join(cut, "ed25519_rfc8032.py"), cpath], env=env, capture_output=True, timeout=60)
+    with open(cpath, "rb") as f:
+        whole = f.read()
+    with open(cpath, "wb") as f:
+        f.write(whole[:1024])                                # header intact, marshal data cut
+    p = subprocess.run([sys.executable, os.path.join(cut, "acceptance_check.py"), paths["verified"]], env=env,
+                       capture_output=True, timeout=60)
+    check("bytecode: a cut .pyc already there is not read", good.returncode == 0 and len(whole) > 1024 and
+          p.returncode == 0 and p.stdout == expected["verified"][1] and p.stderr == b"",
+          "rc=%r %r" % (p.returncode, p.stderr[-120:]))
+    with open(cpath, "rb") as f:
+        check("bytecode: the cut .pyc left as it was", f.read() == whole[:1024])
+
+    # NEMESIS 13/10/2026: imported as a library, the checker changes neither flag
+    p = subprocess.run([sys.executable, "-c", "import sys, acceptance_check; "
+                        "print(sys.dont_write_bytecode, sys.pycache_prefix)"], cwd=HERE, env=env, capture_output=True,
+                       timeout=60)
+    check("library import leaves the bytecode flags alone", p.stdout == b"False None\n", repr((p.stdout, p.stderr[-120:])))
+
+    # NEMESIS 13/10/2026: the error handler of PYTHONIOENCODING is the text layer's (cp864 has no "%"; an unknown
+    # member "%unk" is named in the reason): ":replace" gives the text layer's bytes, strict gives 74 and no receipt
+    pct = copy.deepcopy(vec["acc-accepted-verified"])
+    pct["%unk"] = 1
+    pct_path = os.path.join(d, "pct.json")
+    with open(pct_path, "w") as f:
+        json.dump(pct, f)
+    rep = ac.check(copy.deepcopy(pct))
+    pct_txt = os.path.join(d, "pct.txt")
+    with open(pct_txt, "w", encoding="ascii") as f:
+        f.write(json.dumps(rep, indent=1, sort_keys=True) + "\n")
+    for spec, want_rc in (("cp864:replace", rep["exit"]), ("cp864", 74)):
+        env2 = dict(os.environ, PYTHONIOENCODING=spec)
+        env2.pop("PYTHONUNBUFFERED", None)
+        p = subprocess.run([sys.executable, "-B", AC, pct_path], env=env2, capture_output=True, timeout=60)
+        r = subprocess.run([sys.executable, "-B", "-c", ref_prog, pct_txt], env=env2, capture_output=True, timeout=60)
+        if want_rc == 74:
+            ok = p.returncode == 74 and p.stdout == b"" and r.returncode != 0
+        else:
+            ok = p.returncode == want_rc and r.returncode == 0 and p.stdout == r.stdout and b"?unk" in p.stdout
+        check("error handler %s" % spec, ok, repr((p.returncode, p.stdout[-60:], r.returncode, r.stdout[-60:])))
 
     for f in FAILS:
         print("FAIL", f)

@@ -194,18 +194,25 @@ mixed order (a large-order point plus a small-order one) are not refused, as nei
 are now those Python's own text layer writes there as the first thing written (encoding, error handler, and a byte
 order mark only where that layer writes one). At `acfad3d` they came from `str.encode`: with `PYTHONIOENCODING` set
 to `utf-16` or `utf-32` (or an alias) a pipe got a byte order mark (`ff fe 7b 00` where the text layer writes
-`7b 00`), and so did a file opened for appending with data already in it, for `utf-8-sig` too; on a new file the
-bytes were already the same. In process, after text the caller wrote to a `utf-8-sig` pipe, the receipt still carries
-a second byte order mark (the command has no such case). (2) Run as a command, the checker sets
-`sys.dont_write_bytecode` before importing `ed25519_rfc8032`. At `acfad3d`, from a copy without `__pycache__`, one
-run under `ulimit -f 1` left a 1 024-byte `ed25519_rfc8032.cpython-39.pyc` (and `-311`), and every later run, with
-no limit, exited 1 with `EOFError: marshal data too short` (Python 3.13 installed no cut file). A cache already there
-is still read; one written by a program that imports the checker as a library is not covered. `test_ricevuta.py`
-now compares the receipt with the text layer's bytes (nine encodings, buffered and `-u`, pipe, new file, appended
-file, and in process four encoding spellings) and runs the bytecode case: it fails 21 checks at `acfad3d` on Python
-3.9 and 3.11, 20 on 3.13, none now; `mutanti_ricevuta.py` kills 35/35 on Python 3.11 (10 new). The 47 vectors at
-`6eaf50c`: 46/47, as at `acfad3d` (the disagreement is `acc-complete-not-boolean`), and their 47 receipts written to
-a file are byte-identical to `acfad3d`. Measured on Linux, Python 3.9, 3.11 and 3.13, 13/10/2026.
+`7b 00`), and so did a file whose offset was already past 0 when the checker started (opened for appending by a
+program, as Python's `open(path, "ab")` does, or a shell group `{ printf x; checker; } > f`), for `utf-8-sig` too; on
+a new file, and after a shell's `>>` (the offset is still 0 when Python starts, and the text layer too writes a byte
+order mark in the middle of the file), the bytes were already the same. In process two cases still differ: after
+anything already written to a `utf-8-sig` pipe (the caller's text, an earlier receipt) the receipt carries a second
+byte order mark, and on a file whose offset something else moved after the text layer was made (stderr sharing that
+file) it carries none where that layer writes one; the command has neither case. (2) Run as a command, the checker
+sets `sys.dont_write_bytecode` and points `sys.pycache_prefix` at `os.devnull` before importing `ed25519_rfc8032`, so
+it neither writes nor reads a bytecode cache. At `acfad3d`, from a copy without `__pycache__`, one run under
+`ulimit -f 1` left a 1 024-byte `ed25519_rfc8032.cpython-39.pyc` (and `-311`), and every later run, with no limit,
+exited 1 with `EOFError: marshal data too short` (Python 3.13 installed no cut file, but a cut file
+put there makes it exit 1 as well); a file cut that way is now not opened. One written by a program that imports the
+checker as a library is not covered, and such an import changes neither flag. `test_ricevuta.py` now compares the
+receipt with the text layer's bytes (nine encodings, buffered and `-u`, pipe, new file, appended file, in process
+four encoding spellings, and the `cp864` error handler on a reason with `%`) and runs the bytecode cases: it fails
+22 checks at `acfad3d` on Python 3.9 and 3.11, 21 on 3.13, none now; `mutanti_ricevuta.py` kills 38/38 on Python
+3.11 (13 new). The 47 vectors at `6eaf50c`: 46/47, as at `acfad3d` (the disagreement is
+`acc-complete-not-boolean`), and their 47 receipts written to a file are byte-identical to `acfad3d`. Measured on
+Linux, Python 3.9, 3.11 and 3.13, 13/10/2026.
 
 **2026-10-12 (after `951d4fe`): the receipt on a non-blocking stdout, the reason on a directory.** Three
 changes to how the receipt is written, none to a verdict: (1) a non-blocking stdout that is full (a pipe whose
