@@ -36,6 +36,8 @@ import re
 import stat
 import sys
 
+if __name__ == "__main__":   # run as a command, never write the bytecode cache: CPython 3.9 and 3.11 write a .pyc with
+    sys.dont_write_bytecode = True   # one raw write; cut by a file size limit, every later run died (EOFError, 13/10/2026)
 import ed25519_rfc8032 as ed
 
 VERSION = "acceptance-record-v0"                      # README A1
@@ -496,14 +498,36 @@ def _wait_writable(buf):
         raise OSError("stdout is non-blocking and cannot be waited for: %s" % e)
 
 
+def _text_layer_bytes(out, buf, text):
+    """The bytes Python's own stdout text layer writes for `text` as the first thing written: its encoding and error
+    handler, "\\n" as os.linesep where the platform translates it (not Linux; not measured here), and a byte order mark
+    only where that layer puts one -- utf-16 / utf-32 only on a stdout seekable at offset 0 (a file), utf-8-sig on a
+    pipe too, none on a seekable stdout past offset 0 (measured on 3.9, 3.11 and 3.13, 13/10/2026)."""
+    import codecs
+    if os.linesep != "\n":                                   # the text layer translates "\n" on such platforms
+        text = text.replace("\n", os.linesep)
+    encoding = out.encoding or "utf-8"
+    enc = codecs.getincrementalencoder(encoding)(out.errors or "strict")
+    try:
+        seekable = buf.seekable()
+        at_start = seekable and buf.tell() == 0
+    except (OSError, ValueError):
+        seekable = at_start = False
+    if (seekable and not at_start) or (not seekable and codecs.lookup(encoding).name in ("utf-16", "utf-32")):
+        enc.setstate(0)                                      # no byte order mark
+    return enc.encode(text, final=True)
+
+
 def _write_receipt(text):
     """Write the whole receipt to stdout and flush it; raise OSError if it did not all get there.
 
     The bytes go to sys.stdout.buffer in a loop that checks the count: with -u or PYTHONUNBUFFERED that is a raw
     FileIO, whose write() can be short (a file size limit, a reader that went away) or return None (a non-blocking
     pipe that is full) without raising, and the text layer drops the rest in silence. A non-blocking stdout is
-    waited for, not given up on. The bytes are the ones the text layer would write (its encoding and error handler,
-    its newline translation where the platform has one), so a receipt on a file is byte for byte the same."""
+    waited for, not given up on. The bytes are the ones the text layer would write as the first thing written (its
+    encoding and error handler, its newline translation where the platform has one, a byte order mark only where that
+    layer writes one), so a receipt on a file or a pipe is byte for byte the same; in process, after text the caller
+    wrote to a utf-8-sig pipe, the receipt carries a second one."""
     out = sys.stdout
     if out is None:
         raise OSError("stdout is closed")
@@ -514,9 +538,7 @@ def _write_receipt(text):
             out.write(text)
             out.flush()
             return
-        if os.linesep != "\n":                               # the text layer translates "\n" on such platforms
-            text = text.replace("\n", os.linesep)
-        data = memoryview(text.encode(out.encoding or "utf-8", out.errors or "strict"))
+        data = memoryview(_text_layer_bytes(out, buf, text))
         while data:
             try:
                 n = buf.write(data)

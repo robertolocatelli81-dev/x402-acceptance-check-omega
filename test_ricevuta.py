@@ -14,6 +14,12 @@ an input_error case and a verified case whose receipt is larger than 64 KiB, wit
     one never read (the checker is still waiting after 1.5 s, like `cat` would be), and to a slow pipe (whole),
   - in process, with sys.stdout a StringIO (no bytes below it: the receipt goes through the text layer),
   - on a directory: the input_error reason is "not a regular file", the same bytes whatever descriptor was free,
+  - with PYTHONIOENCODING set to nine encodings, buffered and -u, to a pipe, a new file and an appended file: the
+    bytes equal those Python's own text layer writes there (a byte order mark only where that layer writes one),
+  - in process, main() with sys.stdout a TextIOWrapper over a pipe whose encoding is spelled UTF-16, utf_32, U16 or
+    UTF-8-SIG: the same bytes as that wrapper writes for the same text,
+  - from a copy without a bytecode cache, once under `ulimit -f 1` and once without: the second run gives the
+    verdict and no __pycache__ is written,
 and, in each mode where the receipt is lost, the exit code must be 74 with one line "receipt not written: ..."
 on stderr when stderr works, and no traceback. The usage error keeps exit 3 with stderr closed.
 
@@ -302,6 +308,87 @@ def main():
         p = subprocess.run([sys.executable, "-B", AC] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         check("usage %r rc" % args, p.returncode == 3 and p.stdout == b"" and
               p.stderr == b"usage: acceptance_check.py CASE.json\n", repr((p.returncode, p.stdout, p.stderr)))
+
+    # byte order mark (13/10/2026): the receipt's bytes against Python's own text layer writing the same text to the
+    # same kind of stdout, with the same environment; at acfad3d utf-16 / utf-32 on a pipe carried a BOM (ff fe 7b 00)
+    # that the text layer does not write there
+    text_v = expected["verified"][1].decode("ascii")
+    ref_prog = "import sys; sys.stdout.write(open(sys.argv[1], encoding='ascii').read())"
+    txt = os.path.join(d, "receipt.txt")
+    with open(txt, "w", encoding="ascii") as f:
+        f.write(text_v)
+    for enc in ("utf-8", "utf-8-sig", "utf-16", "utf-32", "UTF-16", "utf_32", "utf-16-le", "cp1252", "latin-1"):
+        for unbuf in (False, True):
+            env = dict(os.environ, PYTHONIOENCODING=enc)
+            env.pop("PYTHONUNBUFFERED", None)
+            if unbuf:
+                env["PYTHONUNBUFFERED"] = "1"
+            tag = "BOM %s %s" % (enc, "-u" if unbuf else "buffered")
+            p = subprocess.run([sys.executable, "-B", AC, paths["verified"]], env=env, capture_output=True, timeout=60)
+            r = subprocess.run([sys.executable, "-B", "-c", ref_prog, txt], env=env, capture_output=True, timeout=60)
+            check(tag + " pipe", p.returncode == 0 and r.returncode == 0 and p.stdout == r.stdout,
+                  "%r vs %r" % (p.stdout[:4], r.stdout[:4]))
+            for mode, pre in (("new file", None), ("appended", b"pre\n")):
+                got, ref = os.path.join(d, "bom_got"), os.path.join(d, "bom_ref")
+                for fn in (got, ref):
+                    with open(fn, "wb") as f:
+                        f.write(pre or b"")
+                fm = "ab" if pre else "wb"
+                with open(got, fm) as f:
+                    rc = subprocess.run([sys.executable, "-B", AC, paths["verified"]], env=env, stdout=f,
+                                        stderr=subprocess.DEVNULL, timeout=60).returncode
+                with open(ref, fm) as f:
+                    subprocess.run([sys.executable, "-B", "-c", ref_prog, txt], env=env, stdout=f, timeout=60)
+                check(tag + " " + mode, rc == 0 and open(got, "rb").read() == open(ref, "rb").read(),
+                      "%r vs %r" % (open(got, "rb").read()[:8], open(ref, "rb").read()[:8]))
+
+    # in process, an encoding name as the caller spelled it (a command gets the codec's own name): a TextIOWrapper with
+    # encoding "UTF-16" or "utf_32" over a pipe, main() called; the bytes must equal the text layer's for the same text
+    code = ("import io, os, sys, acceptance_check as ac\n"
+            "def run(enc, through_main):\n"
+            "    r, w = os.pipe()\n"
+            "    s = io.TextIOWrapper(io.FileIO(w, 'w'), encoding=enc)\n"
+            "    old, sys.stdout = sys.stdout, s\n"
+            "    try:\n"
+            "        if through_main:\n"
+            "            rc = ac.main(['x', sys.argv[1]])\n"
+            "        else:\n"
+            "            rc = 0; s.write(open(sys.argv[2], encoding='ascii').read())\n"
+            "        s.flush()\n"
+            "    finally:\n"
+            "        sys.stdout = old; s.close()\n"
+            "    data = b''\n"
+            "    while True:\n"
+            "        b = os.read(r, 65536)\n"
+            "        if not b: break\n"
+            "        data += b\n"
+            "    os.close(r)\n"
+            "    return rc, data\n"
+            "for enc in ('UTF-16', 'utf_32', 'U16', 'UTF-8-SIG'):\n"
+            "    a, b = run(enc, True), run(enc, False)\n"
+            "    print(enc, 'same' if a == b else 'differ %r %r' % (a[1][:4], b[1][:4]))\n")
+    p = subprocess.run([sys.executable, "-B", "-c", code, paths["verified"], txt], cwd=HERE, capture_output=True,
+                       timeout=60)
+    lines = p.stdout.decode("ascii", "replace").splitlines()
+    check("BOM in process, encoding names as spelled", p.returncode == 0 and len(lines) == 4 and
+          all(l.endswith(" same") for l in lines), repr((p.returncode, lines, p.stderr[-200:])))
+
+    # bytecode cache (13/10/2026): run as a command the checker writes no __pycache__; at acfad3d CPython 3.9 and 3.11
+    # installed a .pyc of ed25519_rfc8032 cut by `ulimit -f 1`, and every later run exited 1 (EOFError)
+    pyc = tempfile.mkdtemp()
+    for name in ("acceptance_check.py", "ed25519_rfc8032.py"):
+        with open(os.path.join(HERE, name), "rb") as f_in, open(os.path.join(pyc, name), "wb") as f_out:
+            f_out.write(f_in.read())
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+    cmd = [sys.executable, os.path.join(pyc, "acceptance_check.py"), paths["verified"]]
+    lim = subprocess.run(["bash", "-c", 'ulimit -f 1; "$@" >/dev/null 2>&1; echo $?', "x"] + cmd, env=env,
+                         capture_output=True, timeout=60)
+    check("bytecode: run under ulimit -f 1", lim.stdout.strip() == b"0", repr(lim.stdout))
+    p = subprocess.run(cmd, env=env, capture_output=True, timeout=60)
+    check("bytecode: later run", p.returncode == 0 and p.stdout == expected["verified"][1] and p.stderr == b"",
+          "rc=%r %r" % (p.returncode, p.stderr[-120:]))
+    check("bytecode: no __pycache__ written", not os.path.exists(os.path.join(pyc, "__pycache__")),
+          repr(os.listdir(pyc)))
 
     for f in FAILS:
         print("FAIL", f)

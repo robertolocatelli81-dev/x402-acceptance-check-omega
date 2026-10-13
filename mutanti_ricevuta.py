@@ -26,7 +26,7 @@ MUTANTS = [
     ("BlockingIOError of a buffered stdout not waited for",
      "                n = e.characters_written\n                waited = True\n", "                raise OSError(str(e))\n"),
     ("receipt written through the text layer (as at c3e44ef)",
-     "        if os.linesep != \"\\n\":", "        out.write(text); out.flush(); return\n        if os.linesep != \"\\n\":"),
+     "        data = memoryview(_text_layer_bytes", "        out.write(text); out.flush(); return\n        data = memoryview(_text_layer_bytes"),
     ("descriptor asked for before writing (no receipt on a TextIOWrapper over BytesIO)",
      "        data = memoryview(", "        buf.fileno()\n        data = memoryview("),
     ("no text-layer fallback when stdout has no .buffer (StringIO)",
@@ -65,6 +65,23 @@ MUTANTS = [
     ("write loop spins instead of waiting", "            if data and waited:\n                _wait_writable(buf)\n",
      "            if data and waited:\n                pass\n"),
     ("select with a zero timeout (spins)", "select.select([], [buf.fileno()], [])", "select.select([], [buf.fileno()], [], 0)"),
+    # 13/10/2026: byte order mark and bytecode cache
+    ("receipt encoded with str.encode (as at acfad3d: a BOM on a pipe and after an append)",
+     "        data = memoryview(_text_layer_bytes(out, buf, text))\n",
+     "        data = memoryview(text.encode(out.encoding or \"utf-8\", out.errors or \"strict\"))\n"),
+    ("BOM never suppressed", "        enc.setstate(0)                                      # no byte order mark\n",
+     "        pass\n"),
+    ("BOM kept past offset 0 of a seekable stdout", "    if (seekable and not at_start) or (not seekable",
+     "    if (not seekable"),
+    ("BOM kept on a utf-16 pipe", 'name in ("utf-16", "utf-32")', 'name in ("utf-32",)'),
+    ("BOM kept on a utf-32 pipe", 'name in ("utf-16", "utf-32")', 'name in ("utf-16",)'),
+    ("encoding name not normalised (aliases UTF-16, utf_32)", "codecs.lookup(encoding).name in", "encoding in"),
+    ("offset not read: every seekable stdout counts as at its start", "        at_start = seekable and buf.tell() == 0\n",
+     "        at_start = seekable\n"),
+    ("BOM suppressed on every pipe (utf-8-sig too)", "(not seekable and codecs.lookup(encoding).name in (\"utf-16\", \"utf-32\"))",
+     "(not seekable)"),
+    ("bytecode cache written when run as a command", "    sys.dont_write_bytecode = True", "    pass"),
+    ("bytecode guard on the wrong branch", 'if __name__ == "__main__":   # run as a command', 'if __name__ != "__main__":   # run as a command'),
 ]
 
 
