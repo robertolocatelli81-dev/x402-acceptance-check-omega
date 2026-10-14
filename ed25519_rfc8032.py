@@ -25,7 +25,7 @@ Not constant time: verification and test signing only.
 import hashlib
 
 p = 2 ** 255 - 19                                                   # 5.1
-L = 2 ** 252 + 27742317777372353535851937790883648493               # 5.1, order of B
+L = 2 ** 252 + 27742317777372353535851937790883648493               # value: 5.1; L is the order of B (3, parameter 10; the group has order 8L)
 d = (-121665 * pow(121666, p - 2, p)) % p                           # 5.1, d = -121665/121666
 _I = pow(2, (p - 1) // 4, p)                                        # 5.1.3 step 3.2, 2^((p-1)/4)
 _NEUTRAL = (0, 1, 1, 0)                                             # 5.1.4, (0, Z, Z, 0) with Z = 1
