@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  tests:
+    # 3.9 has no setup-python build for ubuntu-26.04, which `ubuntu-latest` is becoming between 2026-10-19 and 2026-11-19
+    # (actions/runner-images#14748): the floor runs on ubuntu-24.04, the other two on the current label
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7       # Node 24: Node 20 actions are no longer run (GitHub changelog, 2026-09-23)
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: "cryptography, for the optional cross-checks only (the checker itself is standard library)"
+        run: python -m pip install cryptography
+      - name: Third-party inputs, fetched and checked against their pinned sha256
+        run: python fetch_sources.py
+      - name: The vectors, with the totals and the per-field counts the README states (27/27, 45/46, 49/50)
+        run: |
+          set -e
+          expect() {
+            set +e; out=$(python misura_vettori.py "fonti/$1_vectors.json" 2>&1); set -e
+            line=$(echo "$out" | grep '^TOTAL' || true)
+            echo "$1: $line"
+            if [ "$line" != "TOTAL $2" ]; then echo "$out" | tail -20; echo "::error::$1: expected 'TOTAL $2'"; exit 1; fi
+          }
+          expect d750291 "27/27 agree; per field: {'result': '27/27', 'conditions': '27/27', 'disposition': '7/7', 'key_step': '6/6', 'policy_refusal': '1/1'}"
+          expect 536681b "45/46 agree; per field: {'result': '45/46', 'conditions': '46/46', 'disposition': '8/8', 'key_step': '11/12', 'policy_refusal': '2/3'}"
+          expect 9d4cf2c "49/50 agree; per field: {'result': '49/50', 'conditions': '50/50', 'disposition': '8/8', 'key_step': '14/15', 'policy_refusal': '2/3'}"
+      - name: "ed25519-speccheck: positive control first, then the 12 cases, every one refused (README table)"
+        run: |
+          set -e
+          out=$(python speccheck.py 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          n=$(echo "$out" | grep -cE '^ *[0-9]+ +(accepts|rejects) ' || true)
+          a=$(echo "$out" | grep -cE '^ *[0-9]+ +accepts ' || true)
+          [ "$n" = 12 ] && [ "$a" = 0 ] || { echo "::error::expected 12 cases, all refused; got $n cases, $a accepted"; exit 1; }
+      - name: Tests (each file exits non-zero on any failure)
+        run: |
+          set -e
+          for t in test_generativi test_nemesis test_ed25519 test_piccolo_ordine test_frase5 test_ricevuta; do
+            echo "== $t"; python "$t.py" > "$RUNNER_TEMP/$t.log" 2>&1 || { tail -40 "$RUNNER_TEMP/$t.log"; exit 1; }
+            tail -2 "$RUNNER_TEMP/$t.log"
+          done
+      - name: Positive controls (altered vectors, source mutants)
+        run: python controlli.py
